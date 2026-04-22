@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     bot_shutdown_notifications: bool = False
     allowed_chat_ids: list[int] = Field(default_factory=list)
     alert_chat_ids: list[int] = Field(default_factory=list)
-    alert_message_thread_id: int | None = None
+    alert_message_thread_id: int = 475
     database_url: str = ""
     redis_url: str = ""
     postgres_db: str = "brakerscalp"

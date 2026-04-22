@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: brakerscalp
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
     ports:
-      - "${POSTGRES_PORT}:5432"
+      - "5432:5432"
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d brakerscalp"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -32,7 +32,7 @@ services:
 
   collector:
     build: .
-    env_file: .env
+    env_file: [.env]
     command: ["python", "-m", "brakerscalp.app.collector"]
     depends_on:
       postgres:
@@ -43,7 +43,7 @@ services:
 
   engine:
     build: .
-    env_file: .env
+    env_file: [.env]
     command: ["python", "-m", "brakerscalp.app.engine"]
     depends_on:
       postgres:
@@ -54,7 +54,7 @@ services:
 
   bot:
     build: .
-    env_file: .env
+    env_file: [.env]
     command: ["python", "-m", "brakerscalp.app.bot"]
     depends_on:
       postgres:
@@ -65,10 +65,10 @@ services:
 
   api:
     build: .
-    env_file: .env
+    env_file: [.env]
     command: ["python", "-m", "brakerscalp.app.api"]
     ports:
-      - "${API_PORT}:8080"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,8 +95,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - ./grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -104,3 +104,4 @@ services:
       prometheus:
         condition: service_started
     restart: unless-stopped
+

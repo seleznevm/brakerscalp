@@ -245,7 +245,7 @@ class BotService:
                 chat_id=item.chat_id,
                 message_thread_id=item.message_thread_id,
                 text=item.message_text,
-                signal_class=item.signal_class,
+                signal_class=SignalClass(item.signal_class),
             )
             await self.cache.enqueue_alert(alert)
             await self.repository.mark_delivery(item.signal_id, item.chat_id, "requeued")
