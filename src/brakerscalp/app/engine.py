@@ -15,6 +15,7 @@ async def amain() -> None:
         alert_chat_ids=settings.effective_alert_chat_ids,
         interval_seconds=settings.engine_interval_seconds,
         signal_dedupe_ttl_seconds=settings.signal_dedupe_ttl_seconds,
+        alert_message_thread_id=settings.alert_message_thread_id,
     )
     try:
         await service.run()

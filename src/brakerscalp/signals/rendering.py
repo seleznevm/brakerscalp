@@ -33,12 +33,12 @@ def render_signal(decision: SignalDecision) -> str:
     )
 
 
-def to_alert_message(decision: SignalDecision, chat_id: int) -> AlertMessage:
+def to_alert_message(decision: SignalDecision, chat_id: int, message_thread_id: int | None = None) -> AlertMessage:
     return AlertMessage(
         signal_id=decision.decision_id,
         alert_key=decision.alert_key,
         chat_id=chat_id,
+        message_thread_id=message_thread_id,
         text=render_signal(decision),
         signal_class=decision.signal_class,
     )
-

@@ -186,6 +186,7 @@ class AlertMessage(BaseModel):
     signal_id: str
     alert_key: str
     chat_id: int
+    message_thread_id: int | None = None
     text: str
     signal_class: SignalClass
     created_at: datetime = Field(default_factory=utcnow)
@@ -194,4 +195,3 @@ class AlertMessage(BaseModel):
 class UniverseSymbol(BaseModel):
     symbol: str
     primary_venue: Venue
-

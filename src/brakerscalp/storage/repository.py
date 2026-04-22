@@ -168,6 +168,7 @@ class Repository:
                         signal_id=alert.signal_id,
                         alert_key=alert.alert_key,
                         chat_id=alert.chat_id,
+                        message_thread_id=alert.message_thread_id,
                         signal_class=alert.signal_class.value,
                         status="queued",
                         message_text=alert.text,
@@ -178,6 +179,7 @@ class Repository:
                 )
                 await session.commit()
             else:
+                existing.message_thread_id = alert.message_thread_id
                 existing.message_text = alert.text
                 existing.signal_class = alert.signal_class.value
                 existing.updated_at = now

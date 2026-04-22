@@ -50,6 +50,7 @@ docker compose up --build
 - Universe defaults are stored in `config/universe.json`.
 - The bot is private by default and enforces `ALLOWED_CHAT_IDS`.
 - `ALERT_CHAT_IDS` can be narrower or broader than `ALLOWED_CHAT_IDS`; if omitted it falls back to `ALLOWED_CHAT_IDS`.
+- `ALERT_MESSAGE_THREAD_ID` can be set for Telegram forum groups/topics; for example `475` sends alerts into topic/thread `475` inside the configured group chat.
 - The first release is polling-based and does not expose a Telegram webhook.
 - Postgres credentials in `.env` are reused by `docker-compose.yml`, so the VPS deploy only needs one source of truth.
 - Exchange integrations are public-market-data only in v1, so no exchange API keys are required yet.

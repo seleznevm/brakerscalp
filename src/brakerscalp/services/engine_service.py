@@ -26,6 +26,7 @@ class EngineService:
         alert_chat_ids: list[int],
         interval_seconds: int,
         signal_dedupe_ttl_seconds: int = 14400,
+        alert_message_thread_id: int | None = None,
     ) -> None:
         self.repository = repository
         self.cache = cache
@@ -33,6 +34,7 @@ class EngineService:
         self.alert_chat_ids = alert_chat_ids
         self.interval_seconds = interval_seconds
         self.signal_dedupe_ttl_seconds = signal_dedupe_ttl_seconds
+        self.alert_message_thread_id = alert_message_thread_id
         self.level_detector = LevelDetector()
         self.rule_engine = RuleEngine()
         self.logger = get_logger("engine")
@@ -105,7 +107,7 @@ class EngineService:
             ttl_seconds=self.signal_dedupe_ttl_seconds,
         ):
             for chat_id in self.alert_chat_ids:
-                alert = to_alert_message(decision, chat_id)
+                alert = to_alert_message(decision, chat_id, message_thread_id=self.alert_message_thread_id)
                 await self.repository.ensure_delivery(alert)
                 await self.cache.enqueue_alert(alert)
         self.logger.info("signal-evaluated", symbol=symbol, signal_class=decision.signal_class.value, confidence=decision.confidence)

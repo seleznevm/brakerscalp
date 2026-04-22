@@ -168,6 +168,7 @@ class BotService:
                 signal_id=f"manual-{message.chat.id}-{ts}",
                 alert_key=f"manual:{message.chat.id}:{ts}",
                 chat_id=message.chat.id,
+                message_thread_id=self.settings.alert_message_thread_id,
                 signal_class=SignalClass.WATCHLIST,
                 text=(
                     "TEST | BREAKOUT | LONG | 15m\n"
@@ -222,7 +223,11 @@ class BotService:
                 if await self.cache.is_chat_muted(alert.chat_id):
                     await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "muted")
                     continue
-                await self.bot.send_message(alert.chat_id, alert.text)
+                await self.bot.send_message(
+                    alert.chat_id,
+                    alert.text,
+                    message_thread_id=alert.message_thread_id,
+                )
                 await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "sent")
                 ALERT_LATENCY_SECONDS.observe(0.0)
             except asyncio.CancelledError:
@@ -238,6 +243,7 @@ class BotService:
                 signal_id=item.signal_id,
                 alert_key=item.alert_key,
                 chat_id=item.chat_id,
+                message_thread_id=item.message_thread_id,
                 text=item.message_text,
                 signal_class=item.signal_class,
             )
@@ -265,7 +271,11 @@ class BotService:
             try:
                 if await self.cache.is_chat_muted(chat_id):
                     continue
-                await self.bot.send_message(chat_id, text)
+                await self.bot.send_message(
+                    chat_id,
+                    text,
+                    message_thread_id=self.settings.alert_message_thread_id,
+                )
             except Exception as exc:
                 self.logger.exception("bot-lifecycle-notify-failed", action=action, chat_id=chat_id, error=str(exc))
 

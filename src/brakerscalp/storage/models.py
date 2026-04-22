@@ -90,6 +90,7 @@ class AlertDeliveryRecord(Base):
     signal_id: Mapped[str] = mapped_column(String(64), index=True)
     alert_key: Mapped[str] = mapped_column(String(256), index=True)
     chat_id: Mapped[int] = mapped_column(Integer, index=True)
+    message_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     signal_class: Mapped[str] = mapped_column(String(32), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     message_text: Mapped[str] = mapped_column(Text)
