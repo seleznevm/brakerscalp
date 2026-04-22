@@ -97,4 +97,5 @@ pytest
 - Live adapters are implemented against public exchange market-data endpoints and a common contract.
 - The storage schema is bootstrapped automatically via SQLAlchemy metadata on startup.
 - Alert deliveries are persisted in the database and re-queued on bot restart if they were still `queued`, `requeued` or `failed`.
+- Repeated alerts for the same setup are throttled by a duplicate window so the bot does not spam one breakout every engine cycle.
 - The codebase leaves a clean seam for a later calibrated ranker without blocking the rule-based v1.

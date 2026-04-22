@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Select, desc, func, select
+from sqlalchemy import Select, delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -97,11 +97,10 @@ class Repository:
 
     async def replace_levels(self, symbol: str, venue: str, levels: list[LevelCandidate]) -> None:
         async with self.session_factory() as session:
-            result = await session.execute(
-                select(LevelRecord).where(LevelRecord.symbol == symbol, LevelRecord.venue == venue)
+            await session.execute(
+                delete(LevelRecord).where(LevelRecord.symbol == symbol, LevelRecord.venue == venue)
             )
-            for row in result.scalars():
-                await session.delete(row)
+            await session.flush()
             for level in levels:
                 session.add(
                     LevelRecord(
@@ -152,6 +151,34 @@ class Repository:
                     )
                 )
                 await session.commit()
+
+    async def find_recent_signal_match(
+        self,
+        *,
+        symbol: str,
+        venue: str,
+        setup: str,
+        direction: str,
+        level_id: str,
+        within_minutes: int,
+    ) -> SignalRecord | None:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=within_minutes)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(SignalRecord)
+                .where(
+                    SignalRecord.symbol == symbol,
+                    SignalRecord.venue == venue,
+                    SignalRecord.setup == setup,
+                    SignalRecord.direction == direction,
+                    SignalRecord.level_id == level_id,
+                    SignalRecord.signal_class.in_(["actionable", "watchlist"]),
+                    SignalRecord.detected_at >= cutoff,
+                )
+                .order_by(desc(SignalRecord.detected_at))
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
 
     async def ensure_delivery(self, alert: AlertMessage) -> None:
         now = datetime.now(tz=timezone.utc)

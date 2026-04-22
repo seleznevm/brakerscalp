@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha1
 from datetime import timedelta
 
 from brakerscalp.domain.models import LevelCandidate, LevelKind, MarketCandle, Timeframe, Venue
@@ -69,7 +70,10 @@ class LevelDetector:
         levels.append(self._make_level(symbol, venue, Timeframe.H1, LevelKind.SUPPORT, "vwap-zone", vwap, zone_half_width, candles_1h[-1], 0.6))
         levels.append(self._make_level(symbol, venue, Timeframe.H1, LevelKind.RESISTANCE, "vwap-zone", vwap, zone_half_width, candles_1h[-1], 0.6))
 
-        return levels
+        deduped: dict[str, LevelCandidate] = {}
+        for level in levels:
+            deduped[level.level_id] = level
+        return list(deduped.values())
 
     def _make_level(
         self,
@@ -84,6 +88,7 @@ class LevelDetector:
         strength: float,
     ) -> LevelCandidate:
         return LevelCandidate(
+            level_id=self._stable_level_id(symbol, venue, timeframe, kind, source, reference_price),
             symbol=symbol,
             venue=venue,
             timeframe=timeframe,
@@ -97,3 +102,15 @@ class LevelDetector:
             age_hours=0.0,
             strength=strength,
         )
+
+    def _stable_level_id(
+        self,
+        symbol: str,
+        venue: Venue,
+        timeframe: Timeframe,
+        kind: LevelKind,
+        source: str,
+        reference_price: float,
+    ) -> str:
+        payload = f"{venue.value}|{symbol}|{timeframe.value}|{kind.value}|{source}|{reference_price:.4f}"
+        return sha1(payload.encode("utf-8")).hexdigest()[:24]

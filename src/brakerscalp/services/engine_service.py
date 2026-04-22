@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, SignalClass, UniverseSymbol, Venue
 from brakerscalp.logging import get_logger
@@ -27,6 +28,7 @@ class EngineService:
         interval_seconds: int,
         signal_dedupe_ttl_seconds: int = 14400,
         alert_message_thread_id: int | None = None,
+        signal_duplicate_window_minutes: int = 180,
     ) -> None:
         self.repository = repository
         self.cache = cache
@@ -35,6 +37,7 @@ class EngineService:
         self.interval_seconds = interval_seconds
         self.signal_dedupe_ttl_seconds = signal_dedupe_ttl_seconds
         self.alert_message_thread_id = alert_message_thread_id
+        self.signal_duplicate_window_minutes = signal_duplicate_window_minutes
         self.level_detector = LevelDetector()
         self.rule_engine = RuleEngine()
         self.logger = get_logger("engine")
@@ -61,10 +64,10 @@ class EngineService:
     async def _process_symbol(self, symbol_config: UniverseSymbol) -> int:
         primary_venue = symbol_config.primary_venue.value
         symbol = symbol_config.symbol
-        candles_4h = parse_model_list(await self.cache.get_candles(primary_venue, symbol, "4h"), MarketCandle)
-        candles_1h = parse_model_list(await self.cache.get_candles(primary_venue, symbol, "1h"), MarketCandle)
-        candles_15m = parse_model_list(await self.cache.get_candles(primary_venue, symbol, "15m"), MarketCandle)
-        candles_5m = parse_model_list(await self.cache.get_candles(primary_venue, symbol, "5m"), MarketCandle)
+        candles_4h = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "4h"), MarketCandle))
+        candles_1h = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "1h"), MarketCandle))
+        candles_15m = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "15m"), MarketCandle))
+        candles_5m = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "5m"), MarketCandle))
         health_payload = await self.cache.get_health(primary_venue, symbol)
         book_payload = await self.cache.get_book(primary_venue, symbol)
         derivatives_payload = await self.cache.get_derivative_context(primary_venue, symbol)
@@ -100,6 +103,25 @@ class EngineService:
         if decision is None:
             return stale
 
+        duplicate = await self.repository.find_recent_signal_match(
+            symbol=decision.symbol,
+            venue=decision.venue.value,
+            setup=decision.setup.value,
+            direction=decision.direction.value,
+            level_id=decision.level_id,
+            within_minutes=self.signal_duplicate_window_minutes,
+        )
+        if duplicate is not None:
+            self.logger.info(
+                "signal-duplicate-suppressed",
+                symbol=decision.symbol,
+                setup=decision.setup.value,
+                direction=decision.direction.value,
+                level_id=decision.level_id,
+                previous_detected_at=duplicate.detected_at.isoformat(),
+            )
+            return stale
+
         await self.repository.save_signal(decision)
         ALERTS_TOTAL.labels(signal_class=decision.signal_class.value, setup=decision.setup.value).inc()
         if decision.signal_class != SignalClass.SUPPRESSED and await self.cache.acquire_alert_key(
@@ -112,3 +134,7 @@ class EngineService:
                 await self.cache.enqueue_alert(alert)
         self.logger.info("signal-evaluated", symbol=symbol, signal_class=decision.signal_class.value, confidence=decision.confidence)
         return stale
+
+    def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
+        now = datetime.now(tz=timezone.utc)
+        return [item for item in candles if item.close_time <= now]

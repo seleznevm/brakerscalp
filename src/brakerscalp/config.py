@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     redis_password: str = ""
     poll_interval_seconds: int = 30
     engine_interval_seconds: int = 20
+    signal_duplicate_window_minutes: int = 180
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     exchange_request_timeout_seconds: float = 10.0

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from brakerscalp.domain.models import BookSnapshot, DerivativeContext, MarketCandle, OrderBookLevel, Timeframe, TradeTick, Venue
-from brakerscalp.exchanges.base import ExchangeAdapter, ms_to_dt
+from brakerscalp.exchanges.base import ExchangeAdapter, ms_to_dt, timeframe_to_timedelta
 
 
 OKX_INTERVALS = {
@@ -43,7 +43,7 @@ class OkxAdapter(ExchangeAdapter):
                     venue=self.venue,
                     timeframe=timeframe,
                     open_time=ms_to_dt(row[0]),
-                    close_time=ms_to_dt(int(row[0]) + 1),
+                    close_time=ms_to_dt(row[0]) + timeframe_to_timedelta(timeframe),
                     open=float(row[1]),
                     high=float(row[2]),
                     low=float(row[3]),

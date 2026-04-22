@@ -16,6 +16,7 @@ async def amain() -> None:
         interval_seconds=settings.engine_interval_seconds,
         signal_dedupe_ttl_seconds=settings.signal_dedupe_ttl_seconds,
         alert_message_thread_id=settings.alert_message_thread_id,
+        signal_duplicate_window_minutes=settings.signal_duplicate_window_minutes,
     )
     try:
         await service.run()

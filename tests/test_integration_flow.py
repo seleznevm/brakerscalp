@@ -8,8 +8,9 @@ async def test_engine_generates_alert(repository, cache, make_candles, make_book
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
     candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
     candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=10)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=6)
+    anchor_price = candles_1h[-1].close - 80
+    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
+    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
     candles_15m[-1].close += 500
     candles_15m[-1].high = candles_15m[-1].close + 20
     candles_15m[-1].volume *= 8
@@ -31,3 +32,64 @@ async def test_engine_generates_alert(repository, cache, make_candles, make_book
     queued = await cache.pop_alert(timeout=1)
     assert queued is not None
     assert queued.chat_id == 123
+
+
+async def test_engine_filters_unclosed_candle(repository, cache, make_candles, make_book, make_health, make_derivatives) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
+    candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
+    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
+    anchor_price = candles_1h[-1].close - 80
+    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
+    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
+    candles_15m[-1].close += 500
+    candles_15m[-1].high = candles_15m[-1].close + 20
+    candles_15m[-1].volume *= 8
+    candles_15m[-1].close_time = datetime.now(tz=timezone.utc) + timedelta(minutes=10)
+
+    await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
+    await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)
+    await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
+    await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
+    await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
+    await cache.store_health("binance", "BTCUSDT", make_health())
+    await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
+    await cache.store_health("okx", "BTCUSDT", make_health(venue=Venue.OKX))
+
+    service = EngineService(repository, cache, universe, alert_chat_ids=[123], interval_seconds=1)
+    closed = service._closed_candles(candles_15m)
+    assert len(closed) == len(candles_15m) - 1
+    assert all(item.close_time <= datetime.now(tz=timezone.utc) for item in closed)
+
+
+async def test_engine_suppresses_duplicate_setup(repository, cache, make_candles, make_book, make_health, make_derivatives) -> None:
+    universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
+    candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
+    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
+    anchor_price = candles_1h[-1].close - 80
+    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
+    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
+    candles_15m[-1].close += 500
+    candles_15m[-1].high = candles_15m[-1].close + 20
+    candles_15m[-1].volume *= 8
+
+    await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
+    await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)
+    await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
+    await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
+    await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
+    await cache.store_health("binance", "BTCUSDT", make_health())
+    await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
+    await cache.store_health("okx", "BTCUSDT", make_health(venue=Venue.OKX))
+
+    service = EngineService(repository, cache, universe, alert_chat_ids=[123], interval_seconds=1, signal_duplicate_window_minutes=180)
+    await service.run_once()
+    first_alert = await cache.pop_alert(timeout=1)
+    assert first_alert is not None
+
+    await service.run_once()
+    second_alert = await cache.pop_alert(timeout=1)
+    assert second_alert is None

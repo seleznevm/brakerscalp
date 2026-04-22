@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -11,6 +11,16 @@ from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContex
 
 def ms_to_dt(value: int | str) -> datetime:
     return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+
+
+def timeframe_to_timedelta(timeframe: Timeframe) -> timedelta:
+    mapping = {
+        Timeframe.M5: timedelta(minutes=5),
+        Timeframe.M15: timedelta(minutes=15),
+        Timeframe.H1: timedelta(hours=1),
+        Timeframe.H4: timedelta(hours=4),
+    }
+    return mapping[timeframe]
 
 
 class ExchangeAdapter(ABC):

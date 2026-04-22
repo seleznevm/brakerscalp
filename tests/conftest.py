@@ -41,10 +41,10 @@ def make_candles() -> Callable[..., list[MarketCandle]]:
         step: float = 25.0,
         volume: float = 1000.0,
     ) -> list[MarketCandle]:
-        now = datetime.now(tz=timezone.utc) - timedelta(minutes=count * 15)
         candles: list[MarketCandle] = []
         price = start_price
         minutes = {"5m": 5, "15m": 15, "1h": 60, "4h": 240}[timeframe.value]
+        now = datetime.now(tz=timezone.utc) - timedelta(minutes=count * minutes)
         for index in range(count):
             open_time = now + timedelta(minutes=index * minutes)
             close_time = open_time + timedelta(minutes=minutes)
