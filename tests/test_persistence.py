@@ -37,3 +37,17 @@ async def test_delivery_persistence_and_recovery(repository) -> None:
     assert recoverable[0].message_text == "recover me"
     counts = await repository.delivery_status_counts()
     assert counts["queued"] == 1
+
+
+async def test_large_telegram_chat_id_is_supported(repository) -> None:
+    message = AlertMessage(
+        signal_id="s3",
+        alert_key="k3",
+        chat_id=-1003788053657,
+        message_thread_id=475,
+        text="large chat id",
+        signal_class=SignalClass.WATCHLIST,
+    )
+    await repository.ensure_delivery(message)
+    recoverable = await repository.list_recoverable_deliveries(limit=10)
+    assert any(item.chat_id == -1003788053657 for item in recoverable)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 
 import uvicorn
 
@@ -10,12 +11,13 @@ from brakerscalp.services.api_service import build_api
 
 async def create_app():
     settings, repository, cache, _ = await build_runtime()
-    app = build_api(repository, settings)
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield
         await cache.close()
 
+    app = build_api(repository, settings)
+    app.router.lifespan_context = lifespan
     return settings, app
 
 

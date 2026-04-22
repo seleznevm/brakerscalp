@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 def utcnow() -> datetime:
@@ -57,8 +57,6 @@ class OrderBookLevel(BaseModel):
 
 
 class MarketCandle(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
-
     symbol: str
     venue: Venue
     timeframe: Timeframe

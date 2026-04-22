@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BotCommand, Message
 
 from brakerscalp.config import Settings
@@ -59,6 +60,7 @@ class BotService:
                 "/unmute - unmute current chat\n"
                 "/health - recent signal health\n"
                 "/pending - delivery backlog snapshot\n"
+                "/chatinfo - current chat and topic ids\n"
                 "/config - effective runtime config\n"
                 "/testalert - enqueue local test alert"
             )
@@ -156,7 +158,19 @@ class BotService:
                 f"Engine poll: <code>{self.settings.engine_interval_seconds}s</code>\n"
                 f"API bind: <code>{self.settings.api_host}:{self.settings.api_port}</code>\n"
                 f"Universe: <code>{self.settings.universe_path}</code>\n"
-                f"Alert chats: <code>{', '.join(map(str, self.settings.effective_alert_chat_ids))}</code>"
+                f"Alert chats: <code>{', '.join(map(str, self.settings.effective_alert_chat_ids))}</code>\n"
+                f"Alert topic: <code>{self.settings.alert_message_thread_id}</code>"
+            )
+
+        @self.router.message(Command("chatinfo"))
+        async def chatinfo(message: Message) -> None:
+            if not await self._is_allowed(message):
+                return
+            await message.answer(
+                f"chat_id: <code>{message.chat.id}</code>\n"
+                f"chat_type: <code>{message.chat.type}</code>\n"
+                f"message_thread_id: <code>{message.message_thread_id}</code>\n"
+                f"configured_alert_thread_id: <code>{self.settings.alert_message_thread_id}</code>"
             )
 
         @self.router.message(Command("testalert"))
@@ -216,6 +230,7 @@ class BotService:
 
     async def _consume_outbox(self) -> None:
         while True:
+            alert: AlertMessage | None = None
             try:
                 alert = await self.cache.pop_alert(timeout=5)
                 if alert is None:
@@ -223,16 +238,14 @@ class BotService:
                 if await self.cache.is_chat_muted(alert.chat_id):
                     await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "muted")
                     continue
-                await self.bot.send_message(
-                    alert.chat_id,
-                    alert.text,
-                    message_thread_id=alert.message_thread_id,
-                )
+                await self._send_with_thread_fallback(alert.chat_id, alert.text, alert.message_thread_id)
                 await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "sent")
                 ALERT_LATENCY_SECONDS.observe(0.0)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if alert is not None:
+                    await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "failed", error_message=str(exc))
                 self.logger.exception("bot-delivery-failed", error=str(exc))
 
     async def _recover_pending_deliveries(self) -> int:
@@ -271,11 +284,7 @@ class BotService:
             try:
                 if await self.cache.is_chat_muted(chat_id):
                     continue
-                await self.bot.send_message(
-                    chat_id,
-                    text,
-                    message_thread_id=self.settings.alert_message_thread_id,
-                )
+                await self._send_with_thread_fallback(chat_id, text, self.settings.alert_message_thread_id)
             except Exception as exc:
                 self.logger.exception("bot-lifecycle-notify-failed", action=action, chat_id=chat_id, error=str(exc))
 
@@ -289,6 +298,7 @@ class BotService:
                 BotCommand(command="unmute", description="unmute this chat"),
                 BotCommand(command="health", description="recent signal health"),
                 BotCommand(command="pending", description="delivery backlog"),
+                BotCommand(command="chatinfo", description="current chat info"),
                 BotCommand(command="config", description="runtime config"),
                 BotCommand(command="testalert", description="send synthetic alert"),
                 BotCommand(command="help", description="command list"),
@@ -311,3 +321,25 @@ class BotService:
         if not counts:
             return "empty"
         return ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+
+    async def _send_with_thread_fallback(self, chat_id: int, text: str, message_thread_id: int | None) -> None:
+        try:
+            await self.bot.send_message(
+                chat_id,
+                text,
+                message_thread_id=message_thread_id,
+            )
+        except TelegramBadRequest as exc:
+            error_text = str(exc).lower()
+            if message_thread_id and (
+                "message thread not found" in error_text or "chat not found" in error_text
+            ):
+                self.logger.warning(
+                    "bot-thread-fallback",
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    error=str(exc),
+                )
+                await self.bot.send_message(chat_id, text)
+                return
+            raise
