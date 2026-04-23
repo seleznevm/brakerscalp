@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
 from brakerscalp.config import Settings
 from brakerscalp.domain.models import AlertMessage, SignalClass
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import ALERT_LATENCY_SECONDS
+from brakerscalp.services.daily_summary import SignalOutcome, classify_signal_outcome, render_daily_summary
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.repository import Repository
 
@@ -36,7 +38,9 @@ class BotService:
         self.repository = repository
         self.cache = cache
         self.logger = get_logger("bot")
+        self.local_tz = self._load_timezone(settings.timezone)
         self._consume_task: asyncio.Task | None = None
+        self._daily_summary_task: asyncio.Task | None = None
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -45,8 +49,8 @@ class BotService:
             if not await self._is_allowed(message):
                 return
             await message.answer(
-                f"{self.settings.app_name} ready.\n"
-                "Commands: /status /last /mute /unmute /health /pending /config /testalert /help"
+                f"{self.settings.app_name} готов.\n"
+                "Команды: /status /last /mute /unmute /health /pending /summary /config /testalert /help"
             )
 
         @self.router.message(Command("help"))
@@ -54,15 +58,16 @@ class BotService:
             if not await self._is_allowed(message):
                 return
             await message.answer(
-                "/status - bot state\n"
-                "/last - last stored signal\n"
-                "/mute - mute current chat\n"
-                "/unmute - unmute current chat\n"
-                "/health - recent signal health\n"
-                "/pending - delivery backlog snapshot\n"
-                "/chatinfo - current chat and topic ids\n"
-                "/config - effective runtime config\n"
-                "/testalert - enqueue local test alert"
+                "/status - состояние бота\n"
+                "/last - последний сохраненный сигнал\n"
+                "/mute - выключить алерты в этом чате\n"
+                "/unmute - включить алерты в этом чате\n"
+                "/health - свежесть сигналов и биржевых данных\n"
+                "/pending - очередь доставок\n"
+                "/summary - сводка по сигналам за сегодня\n"
+                "/chatinfo - chat_id и topic_id текущего чата\n"
+                "/config - текущая конфигурация runtime\n"
+                "/testalert - положить тестовый алерт в outbox"
             )
 
         @self.router.message(Command("status"))
@@ -73,11 +78,11 @@ class BotService:
             muted = await self.cache.is_chat_muted(message.chat.id)
             delivery_counts = await self.repository.delivery_status_counts()
             await message.answer(
-                f"Signals stored: {count}\n"
-                f"Muted: {'yes' if muted else 'no'}\n"
-                f"Allowed chats: {len(self.allowed_chat_ids)}\n"
-                f"Alert chats: {len(self.alert_chat_ids)}\n"
-                f"Delivery queue: {self._format_delivery_counts(delivery_counts)}"
+                f"Сигналов в базе: {count}\n"
+                f"Чат заглушен: {'да' if muted else 'нет'}\n"
+                f"Разрешенных чатов: {len(self.allowed_chat_ids)}\n"
+                f"Чатов для алертов: {len(self.alert_chat_ids)}\n"
+                f"Очередь доставок: {self._format_delivery_counts(delivery_counts)}"
             )
 
         @self.router.message(Command("last"))
@@ -86,13 +91,15 @@ class BotService:
                 return
             alerts = await self.repository.list_latest_alerts(limit=1)
             if not alerts:
-                await message.answer("No alerts yet.")
+                await message.answer("Сигналов пока нет.")
                 return
             last_signal = alerts[0]
             await message.answer(
+                "Последний сигнал:\n"
                 f"{last_signal.symbol} {last_signal.setup.upper()} "
                 f"{last_signal.direction.upper()} {last_signal.signal_class.upper()} "
-                f"{last_signal.confidence:.0f}"
+                f"{last_signal.confidence:.0f}\n"
+                f"Время: {self._format_local_dt(last_signal.detected_at)}"
             )
 
         @self.router.message(Command("mute"))
@@ -100,14 +107,14 @@ class BotService:
             if not await self._is_allowed(message):
                 return
             await self.cache.set_chat_muted(message.chat.id, True)
-            await message.answer("Alerts muted for this chat.")
+            await message.answer("Алерты для этого чата выключены.")
 
         @self.router.message(Command("unmute"))
         async def unmute(message: Message) -> None:
             if not await self._is_allowed(message):
                 return
             await self.cache.set_chat_muted(message.chat.id, False)
-            await message.answer("Alerts unmuted for this chat.")
+            await message.answer("Алерты для этого чата снова включены.")
 
         @self.router.message(Command("health"))
         async def health(message: Message) -> None:
@@ -117,20 +124,20 @@ class BotService:
             venue_health = await self.repository.list_latest_health(limit=6)
             signal_lines = (
                 "\n".join(
-                    f"{item.symbol} {item.signal_class.upper()} {item.detected_at.isoformat()}"
+                    f"{item.symbol} {item.signal_class.upper()} {self._format_local_dt(item.detected_at)}"
                     for item in alerts
                 )
-                or "No signals yet."
+                or "Сигналов пока нет."
             )
             venue_lines = (
                 "\n".join(
-                    f"{item.venue}:{item.symbol} fresh={'yes' if item.is_fresh else 'no'} "
-                    f"gap={'yes' if item.has_sequence_gap else 'no'} freshness={item.freshness_ms}ms"
+                    f"{item.venue}:{item.symbol} свежие={'да' if item.is_fresh else 'нет'} "
+                    f"разрыв={'да' if item.has_sequence_gap else 'нет'} свежесть={item.freshness_ms}ms"
                     for item in venue_health
                 )
-                or "No venue health yet."
+                or "Данных по биржам пока нет."
             )
-            await message.answer(f"Signals:\n{signal_lines}\n\nVenues:\n{venue_lines}")
+            await message.answer(f"Сигналы:\n{signal_lines}\n\nБиржи:\n{venue_lines}")
 
         @self.router.message(Command("pending"))
         async def pending(message: Message) -> None:
@@ -138,7 +145,7 @@ class BotService:
                 return
             deliveries = await self.repository.list_recoverable_deliveries(limit=10)
             if not deliveries:
-                await message.answer("No recoverable deliveries.")
+                await message.answer("Восстанавливаемых доставок нет.")
                 return
             text = "\n".join(
                 f"{item.chat_id} {item.status} {item.signal_class.upper()} {item.signal_id}"
@@ -146,20 +153,27 @@ class BotService:
             )
             await message.answer(text)
 
+        @self.router.message(Command("summary"))
+        async def summary(message: Message) -> None:
+            if not await self._is_allowed(message):
+                return
+            await message.answer(await self._build_daily_summary(datetime.now(self.local_tz).date()))
+
         @self.router.message(Command("config"))
         async def config(message: Message) -> None:
             if not await self._is_allowed(message):
                 return
             await message.answer(
-                f"Environment: <code>{self.settings.environment}</code>\n"
-                f"Timezone: <code>{self.settings.timezone}</code>\n"
-                f"Venues: <code>{', '.join(self.settings.enabled_venues)}</code>\n"
-                f"Collector poll: <code>{self.settings.poll_interval_seconds}s</code>\n"
-                f"Engine poll: <code>{self.settings.engine_interval_seconds}s</code>\n"
+                f"Окружение: <code>{self.settings.environment}</code>\n"
+                f"Часовой пояс: <code>{self.settings.timezone}</code>\n"
+                f"Биржи: <code>{', '.join(self.settings.enabled_venues)}</code>\n"
+                f"Интервал collector: <code>{self.settings.poll_interval_seconds}s</code>\n"
+                f"Интервал engine: <code>{self.settings.engine_interval_seconds}s</code>\n"
                 f"API bind: <code>{self.settings.api_host}:{self.settings.api_port}</code>\n"
                 f"Universe: <code>{self.settings.universe_path}</code>\n"
-                f"Alert chats: <code>{', '.join(map(str, self.settings.effective_alert_chat_ids))}</code>\n"
-                f"Alert topic: <code>{self.settings.alert_message_thread_id}</code>"
+                f"Чаты для алертов: <code>{', '.join(map(str, self.settings.effective_alert_chat_ids))}</code>\n"
+                f"Topic для алертов: <code>{self.settings.alert_message_thread_id}</code>\n"
+                f"Ежедневная сводка: <code>23:00 {self.settings.timezone}</code>"
             )
 
         @self.router.message(Command("chatinfo"))
@@ -186,45 +200,46 @@ class BotService:
                 signal_class=SignalClass.WATCHLIST,
                 text=(
                     "TEST | BREAKOUT | LONG | 15m\n"
-                    "Confidence: 72\n\n"
-                    "Level:\n"
-                    "65000.0000 - 65100.0000 | HTF source: 1h manual-test\n\n"
-                    "Trigger:\n"
-                    "Manual test alert generated from /testalert\n\n"
-                    "Rationale:\n"
-                    "- Telegram integration ok\n"
-                    "- Outbox ok\n"
-                    "- Current chat is allowlisted\n\n"
-                    "Invalidation:\n"
-                    "- Stop logic: below level with 0.2 ATR buffer\n"
-                    "- Cancel if: manual test only\n\n"
-                    "Targets:\n"
+                    "#BREAKOUT #TEST\n"
+                    "Уверенность: 72\n\n"
+                    "Уровень:\n"
+                    "65000.0000 - 65100.0000 | HTF источник: 1h manual-test\n\n"
+                    "Триггер:\n"
+                    "Тестовый алерт, сгенерированный через /testalert\n\n"
+                    "Обоснование:\n"
+                    "- Интеграция с Telegram работает\n"
+                    "- Outbox работает\n"
+                    "- Текущий чат в allowlist\n\n"
+                    "Инвалидация:\n"
+                    "- Стоп-логика: ниже уровня с буфером 0.2 ATR\n"
+                    "- Отмена, если: это только тестовый алерт\n\n"
+                    "Цели:\n"
                     "- T1: 65250.0000\n"
                     "- T2: 65400.0000\n"
-                    "- Expected R:R: 2.00\n\n"
-                    "Why confidence is not higher:\n"
-                    "- This is a synthetic test alert.\n\n"
-                    "Data health:\n"
-                    "- Freshness: 0 ms\n"
-                    "- Venues used: manual\n"
-                    "- Sequence gaps: none"
+                    "- Ожидаемый R:R: 2.00\n\n"
+                    "Почему уверенность не выше:\n"
+                    "- Это синтетический тестовый алерт.\n\n"
+                    "Состояние данных:\n"
+                    "- Свежесть: 0 ms\n"
+                    "- Использованные биржи: manual\n"
+                    "- Разрывы последовательности: нет"
                 ),
             )
             await self.repository.ensure_delivery(alert)
             await self.cache.enqueue_alert(alert)
-            await message.answer("Test alert queued into outbox.")
+            await message.answer("Тестовый алерт поставлен в outbox.")
 
         @self.router.message(F.text)
         async def fallback(message: Message) -> None:
             if not await self._is_allowed(message):
                 return
-            await message.answer("Use /help to see available commands.")
+            await message.answer("Используйте /help, чтобы посмотреть доступные команды.")
 
         self.dispatcher.include_router(self.router)
 
     async def _is_allowed(self, message: Message) -> bool:
         if message.chat.id not in self.allowed_chat_ids:
-            await message.answer("Access denied.")
+            await message.answer("Доступ запрещен.")
             return False
         return True
 
@@ -267,6 +282,51 @@ class BotService:
             self.logger.info("bot-recovered-deliveries", count=recovered)
         return recovered
 
+    async def _daily_summary_loop(self) -> None:
+        while True:
+            now_local = datetime.now(self.local_tz)
+            scheduled_at = self._next_summary_at(now_local)
+            delay = max((scheduled_at - now_local).total_seconds(), 1.0)
+            await asyncio.sleep(delay)
+            await self._send_daily_summary(datetime.now(self.local_tz).date())
+
+    async def _send_daily_summary(self, report_date: date) -> bool:
+        if not self.alert_chat_ids:
+            return False
+        dedupe_key = report_date.isoformat()
+        if not await self.cache.acquire_once_key("daily-summary", dedupe_key, ttl_seconds=7 * 24 * 3600):
+            return False
+        text = await self._build_daily_summary(report_date)
+        sent = False
+        for chat_id in self.alert_chat_ids:
+            try:
+                if await self.cache.is_chat_muted(chat_id):
+                    continue
+                await self._send_with_thread_fallback(chat_id, text, self.settings.alert_message_thread_id)
+                sent = True
+            except Exception as exc:
+                self.logger.exception("bot-daily-summary-failed", chat_id=chat_id, report_date=report_date.isoformat(), error=str(exc))
+        return sent
+
+    async def _build_daily_summary(self, report_date: date) -> str:
+        start_utc, end_utc = self._local_day_bounds(report_date)
+        signals = await self.repository.list_signals_between(
+            start_utc,
+            end_utc,
+            signal_classes=["actionable", "watchlist"],
+        )
+        outcomes: list[SignalOutcome] = []
+        for signal in signals:
+            candles = await self.repository.get_candles_between(
+                signal.venue,
+                signal.symbol,
+                signal.timeframe,
+                signal.detected_at,
+                end_utc,
+            )
+            outcomes.append(SignalOutcome(signal=signal, status=classify_signal_outcome(signal, candles)))
+        return render_daily_summary(report_date, outcomes)
+
     async def _notify_lifecycle(self, action: str) -> None:
         if action == "startup" and not self.settings.bot_startup_notifications:
             return
@@ -274,11 +334,12 @@ class BotService:
             return
         if not self.alert_chat_ids:
             return
+        action_text = "запущен" if action == "startup" else "остановлен"
         text = (
-            f"<b>{self.settings.app_name}</b> {action}\n"
-            f"environment: <code>{self.settings.environment}</code>\n"
-            f"venues: <code>{', '.join(self.settings.enabled_venues)}</code>\n"
-            f"time: <code>{datetime.now(tz=timezone.utc).isoformat()}</code>"
+            f"<b>{self.settings.app_name}</b> {action_text}\n"
+            f"окружение: <code>{self.settings.environment}</code>\n"
+            f"биржи: <code>{', '.join(self.settings.enabled_venues)}</code>\n"
+            f"время: <code>{self._format_local_dt(datetime.now(tz=timezone.utc))}</code>"
         )
         for chat_id in self.alert_chat_ids:
             try:
@@ -291,36 +352,62 @@ class BotService:
     async def run(self) -> None:
         await self.bot.set_my_commands(
             [
-                BotCommand(command="start", description="start bot"),
-                BotCommand(command="status", description="show service state"),
-                BotCommand(command="last", description="show last signal"),
-                BotCommand(command="mute", description="mute this chat"),
-                BotCommand(command="unmute", description="unmute this chat"),
-                BotCommand(command="health", description="recent signal health"),
-                BotCommand(command="pending", description="delivery backlog"),
-                BotCommand(command="chatinfo", description="current chat info"),
-                BotCommand(command="config", description="runtime config"),
-                BotCommand(command="testalert", description="send synthetic alert"),
-                BotCommand(command="help", description="command list"),
+                BotCommand(command="start", description="запустить бота"),
+                BotCommand(command="status", description="состояние сервиса"),
+                BotCommand(command="last", description="последний сигнал"),
+                BotCommand(command="mute", description="выключить алерты в чате"),
+                BotCommand(command="unmute", description="включить алерты в чате"),
+                BotCommand(command="health", description="свежесть данных"),
+                BotCommand(command="pending", description="очередь доставок"),
+                BotCommand(command="summary", description="сводка за сегодня"),
+                BotCommand(command="chatinfo", description="информация о чате"),
+                BotCommand(command="config", description="runtime конфигурация"),
+                BotCommand(command="testalert", description="тестовый алерт"),
+                BotCommand(command="help", description="список команд"),
             ]
         )
         await self._recover_pending_deliveries()
         self._consume_task = asyncio.create_task(self._consume_outbox())
+        self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
         await self._notify_lifecycle("startup")
         await self.dispatcher.start_polling(self.bot, polling_timeout=self.settings.bot_polling_timeout_seconds)
 
     async def shutdown(self) -> None:
-        if self._consume_task:
-            self._consume_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._consume_task
+        for task in [self._consume_task, self._daily_summary_task]:
+            if task:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
         await self._notify_lifecycle("shutdown")
         await self.bot.session.close()
 
     def _format_delivery_counts(self, counts: dict[str, int]) -> str:
         if not counts:
-            return "empty"
+            return "пусто"
         return ", ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+
+    def _format_local_dt(self, value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(self.local_tz).strftime("%d.%m.%Y %H:%M:%S")
+
+    def _local_day_bounds(self, report_date: date) -> tuple[datetime, datetime]:
+        start_local = datetime.combine(report_date, time(0, 0), tzinfo=self.local_tz)
+        end_local = start_local + timedelta(days=1)
+        return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+    def _next_summary_at(self, now_local: datetime) -> datetime:
+        target = now_local.replace(hour=23, minute=0, second=0, microsecond=0)
+        if now_local >= target:
+            target += timedelta(days=1)
+        return target
+
+    def _load_timezone(self, timezone_name: str) -> ZoneInfo:
+        try:
+            return ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            self.logger.warning("bot-invalid-timezone-fallback", timezone=timezone_name)
+            return ZoneInfo("UTC")
 
     async def _send_with_thread_fallback(self, chat_id: int, text: str, message_thread_id: int | None) -> None:
         try:

@@ -61,6 +61,9 @@ class StateCache:
     async def acquire_alert_key(self, alert_key: str, ttl_seconds: int = 14400) -> bool:
         return bool(await self.redis.set(self._key("dedupe", alert_key), b"1", nx=True, ex=ttl_seconds))
 
+    async def acquire_once_key(self, namespace: str, key: str, ttl_seconds: int) -> bool:
+        return bool(await self.redis.set(self._key(namespace, key), b"1", nx=True, ex=ttl_seconds))
+
     async def enqueue_alert(self, alert: AlertMessage) -> None:
         await self.redis.rpush(self._key("outbox"), dumps(alert.model_dump(mode="json")))
 

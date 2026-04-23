@@ -263,6 +263,26 @@ class Repository:
             result = await session.execute(select(SignalRecord).order_by(desc(SignalRecord.detected_at)).limit(limit))
             return list(result.scalars())
 
+    async def list_signals_between(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        signal_classes: list[str] | None = None,
+    ) -> list[SignalRecord]:
+        async with self.session_factory() as session:
+            stmt = (
+                select(SignalRecord)
+                .where(
+                    SignalRecord.detected_at >= start_at,
+                    SignalRecord.detected_at < end_at,
+                )
+                .order_by(SignalRecord.detected_at.asc())
+            )
+            if signal_classes:
+                stmt = stmt.where(SignalRecord.signal_class.in_(signal_classes))
+            result = await session.execute(stmt)
+            return list(result.scalars())
+
     async def list_latest_deliveries(self, limit: int = 20) -> list[AlertDeliveryRecord]:
         async with self.session_factory() as session:
             result = await session.execute(select(AlertDeliveryRecord).order_by(desc(AlertDeliveryRecord.updated_at)).limit(limit))
@@ -311,6 +331,28 @@ class Repository:
                 .limit(limit)
             )
             return list(reversed(list(result.scalars())))
+
+    async def get_candles_between(
+        self,
+        venue: str,
+        symbol: str,
+        timeframe: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> list[CandleRecord]:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(CandleRecord)
+                .where(
+                    CandleRecord.venue == venue,
+                    CandleRecord.symbol == symbol,
+                    CandleRecord.timeframe == timeframe,
+                    CandleRecord.open_time >= start_at,
+                    CandleRecord.open_time < end_at,
+                )
+                .order_by(CandleRecord.open_time.asc())
+            )
+            return list(result.scalars())
 
     async def signal_count(self) -> int:
         async with self.session_factory() as session:

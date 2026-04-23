@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from brakerscalp.domain.models import AlertMessage, SignalClass
+from brakerscalp.storage.models import CandleRecord, SignalRecord
 
 
 async def test_alert_deduplication(cache) -> None:
@@ -51,3 +54,71 @@ async def test_large_telegram_chat_id_is_supported(repository) -> None:
     await repository.ensure_delivery(message)
     recoverable = await repository.list_recoverable_deliveries(limit=10)
     assert any(item.chat_id == -1003788053657 for item in recoverable)
+
+
+async def test_repository_lists_signals_and_candles_for_daily_summary(repository) -> None:
+    signal_time = datetime(2026, 4, 23, 10, 0, tzinfo=timezone.utc)
+    next_candle_open = signal_time + timedelta(minutes=15)
+    async with repository.session_factory() as session:
+        session.add(
+            SignalRecord(
+                decision_id="summary-1",
+                alert_key="summary-key-1",
+                venue="binance",
+                symbol="ETHUSDT",
+                timeframe="15m",
+                setup="breakout",
+                direction="long",
+                signal_class="actionable",
+                confidence=88.0,
+                level_id="level-summary-1",
+                detected_at=signal_time,
+                entry_price=2000.0,
+                invalidation_price=1950.0,
+                targets=[2100.0, 2200.0],
+                expected_rr=2.0,
+                rationale=[],
+                why_not_higher=[],
+                contributions=[],
+                data_health={},
+                feature_snapshot={},
+                render_context={},
+            )
+        )
+        session.add(
+            CandleRecord(
+                venue="binance",
+                symbol="ETHUSDT",
+                timeframe="15m",
+                open_time=next_candle_open,
+                close_time=next_candle_open + timedelta(minutes=15),
+                open=2000.0,
+                high=2110.0,
+                low=1990.0,
+                close=2105.0,
+                volume=5000.0,
+                quote_volume=10500000.0,
+                trade_count=100,
+                taker_buy_volume=2600.0,
+                vwap=2050.0,
+            )
+        )
+        await session.commit()
+
+    signals = await repository.list_signals_between(
+        datetime(2026, 4, 23, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 4, 24, 0, 0, tzinfo=timezone.utc),
+        signal_classes=["actionable", "watchlist"],
+    )
+    candles = await repository.get_candles_between(
+        "binance",
+        "ETHUSDT",
+        "15m",
+        signal_time,
+        datetime(2026, 4, 24, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(signals) == 1
+    assert signals[0].symbol == "ETHUSDT"
+    assert len(candles) == 1
+    assert candles[0].high == 2110.0

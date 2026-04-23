@@ -30,6 +30,10 @@ def test_render_signal_contains_required_sections(make_candles, make_book, make_
         )
     )
     text = render_signal(decision)
-    assert "Confidence:" in text
-    assert "Invalidation:" in text
-    assert "Data health:" in text
+    assert "#BREAKOUT" in text
+    assert "#BTC" in text
+    assert "Уверенность:" in text
+    assert "Триггер:" in text
+    assert "Обоснование:" in text
+    assert "Инвалидация:" in text
+    assert "Почему уверенность не выше:" in text

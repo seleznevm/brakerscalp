@@ -184,28 +184,28 @@ class RuleEngine:
 
         why_not_higher = []
         if volume_score_raw < 2.0:
-            why_not_higher.append(f"Volume confirm still moderate ({volume_score_raw:.2f} z-score).")
+            why_not_higher.append(f"Подтверждение по объему пока умеренное ({volume_score_raw:.2f} z-score).")
         if derivatives and abs(derivatives.funding_rate) > 0.0008:
-            why_not_higher.append(f"Funding looks crowded at {derivatives.funding_rate:.5f}.")
+            why_not_higher.append(f"Фандинг выглядит перегретым: {derivatives.funding_rate:.5f}.")
         if not cross_ok:
-            why_not_higher.append("Cross-venue health is weaker than desired.")
+            why_not_higher.append("Кросс-биржевое подтверждение слабее желаемого.")
         if not why_not_higher:
-            why_not_higher.append("Signal is strong, but confidence remains capped until more live samples are collected.")
+            why_not_higher.append("Сигнал сильный, но confidence пока ограничен, пока не накоплена большая live-статистика.")
 
         rationale = [
-            f"Volume z-score: {volume_score_raw:.2f}",
-            f"Book imbalance: {self._book_imbalance(book):.2f}" if book else "Book imbalance: n/a",
-            f"OI change proxy: {derivatives.open_interest:.2f}" if derivatives else "OI change proxy: n/a",
-            f"Funding / basis context: {self._derivatives_summary(derivatives)}",
-            f"Retest / rejection confirmation: {'yes' if setup == SetupType.BOUNCE else 'no'}",
+            f"Z-score объема: {volume_score_raw:.2f}",
+            f"Дисбаланс стакана: {self._book_imbalance(book):.2f}" if book else "Дисбаланс стакана: н/д",
+            f"Прокси изменения OI: {derivatives.open_interest:.2f}" if derivatives else "Прокси изменения OI: н/д",
+            f"Контекст funding / basis: {self._derivatives_summary(derivatives)}",
+            f"Подтверждение ретеста / отскока: {'да' if setup == SetupType.BOUNCE else 'нет'}",
         ]
         health = payload.health.model_copy(update={"spread_ratio": spread_ratio})
         render_context = {
             "price_zone": level.zone_text,
             "htf_source": f"{level.timeframe.value} {level.source}",
             "trigger": self._trigger_text(setup, direction, current, level, atr),
-            "stop_logic": f"{'below' if direction == Direction.LONG else 'above'} level with 0.2 ATR buffer",
-            "cancel_if": "two closes back inside zone / stale data / spread spike",
+            "stop_logic": f"{'ниже' if direction == Direction.LONG else 'выше'} уровня с буфером 0.2 ATR",
+            "cancel_if": "две свечи закрылись обратно в зоне / устаревшие данные / всплеск спреда",
             "venues_used": ", ".join(sorted({payload.venue.value, *[item.venue.value for item in payload.cross_venue_health]})),
         }
         return SignalDecision(
@@ -271,14 +271,14 @@ class RuleEngine:
 
     def _derivatives_summary(self, derivatives: DerivativeContext | None) -> str:
         if derivatives is None:
-            return "n/a"
+            return "н/д"
         return f"funding {derivatives.funding_rate:.5f}, basis {derivatives.basis_bps:.1f} bps"
 
     def _trigger_text(self, setup: SetupType, direction: Direction, candle: MarketCandle, level: LevelCandidate, atr: float) -> str:
         if setup == SetupType.BREAKOUT:
-            side = "above resistance" if direction == Direction.LONG else "below support"
-            return f"15m close {0.15:.2f} ATR {side} ({candle.close:.4f})"
-        return f"Wick sweep of {level.zone_text} and close back inside zone ({candle.close:.4f})"
+            side = "выше сопротивления" if direction == Direction.LONG else "ниже поддержки"
+            return f"Закрытие 15m на {0.15:.2f} ATR {side} ({candle.close:.4f})"
+        return f"Тенью сняли {level.zone_text} и закрылись обратно в зону ({candle.close:.4f})"
 
     def _classify(self, confidence: float) -> SignalClass:
         if confidence >= 80:
