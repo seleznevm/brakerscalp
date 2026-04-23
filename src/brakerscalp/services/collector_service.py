@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from brakerscalp.domain.models import Timeframe, UniverseSymbol
+from brakerscalp.domain.models import DataHealth, Timeframe, UniverseSymbol, Venue
 from brakerscalp.exchanges.base import ExchangeAdapter
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import VENUE_HEALTH
@@ -18,6 +18,7 @@ class CollectorService:
         cache: StateCache,
         universe: list[UniverseSymbol],
         poll_interval_seconds: int,
+        symbol_concurrency: int = 6,
         exchange_book_depth: int = 10,
         exchange_trades_limit: int = 50,
     ) -> None:
@@ -26,6 +27,7 @@ class CollectorService:
         self.cache = cache
         self.universe = universe
         self.poll_interval_seconds = poll_interval_seconds
+        self.symbol_concurrency = max(symbol_concurrency, 1)
         self.exchange_book_depth = exchange_book_depth
         self.exchange_trades_limit = exchange_trades_limit
         self.logger = get_logger("collector")
@@ -39,9 +41,51 @@ class CollectorService:
             await asyncio.sleep(self.poll_interval_seconds)
 
     async def collect_once(self) -> None:
-        for item in self.universe:
-            for venue, adapter in self.adapters.items():
-                await self._collect_symbol(adapter, venue.value, item.symbol)
+        semaphore = asyncio.Semaphore(self.symbol_concurrency)
+
+        async def _collect(item: UniverseSymbol) -> None:
+            async with semaphore:
+                await self._collect_universe_symbol(item)
+
+        await asyncio.gather(*[_collect(item) for item in self.universe])
+
+    async def _collect_universe_symbol(self, item: UniverseSymbol) -> None:
+        primary_adapter = self.adapters.get(item.primary_venue)
+        tasks = []
+        if primary_adapter is None:
+            await self._record_collection_failure(
+                item.primary_venue,
+                item.symbol,
+                RuntimeError("primary venue adapter is disabled or unavailable"),
+                stage="primary-config",
+            )
+        else:
+            tasks.append(self._collect_primary_symbol(primary_adapter, item.primary_venue, item.symbol))
+
+        for venue, adapter in self.adapters.items():
+            if venue == item.primary_venue:
+                continue
+            tasks.append(self._collect_secondary_health(adapter, venue, item.symbol))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def _collect_primary_symbol(self, adapter: ExchangeAdapter, venue: Venue, symbol: str) -> None:
+        try:
+            await self._collect_symbol(adapter, venue.value, symbol)
+        except Exception as exc:
+            await self._record_collection_failure(venue, symbol, exc, stage="primary")
+
+    async def _collect_secondary_health(self, adapter: ExchangeAdapter, venue: Venue, symbol: str) -> None:
+        try:
+            health = await adapter.healthcheck(symbol)
+        except Exception as exc:
+            await self._record_collection_failure(venue, symbol, exc, stage="secondary-health")
+            return
+
+        await self.cache.store_health(venue.value, symbol, health)
+        await self.repository.upsert_health(health)
+        VENUE_HEALTH.labels(venue=venue.value, symbol=symbol).set(1 if health.is_fresh and not health.has_sequence_gap else 0)
 
     async def _collect_symbol(self, adapter: ExchangeAdapter, venue: str, symbol: str) -> None:
         timeframes = [Timeframe.H4, Timeframe.H1, Timeframe.M15, Timeframe.M5]
@@ -66,3 +110,17 @@ class CollectorService:
         await self.repository.upsert_health(health)
         VENUE_HEALTH.labels(venue=venue, symbol=symbol).set(1 if health.is_fresh and not health.has_sequence_gap else 0)
         self.logger.info("collector-updated", venue=venue, symbol=symbol, candles=len(all_candles), trades=len(trades))
+
+    async def _record_collection_failure(self, venue: Venue, symbol: str, exc: Exception, stage: str) -> None:
+        health = DataHealth(
+            venue=venue,
+            symbol=symbol,
+            is_fresh=False,
+            has_sequence_gap=True,
+            freshness_ms=86_400_000,
+            notes=[f"{stage}: {type(exc).__name__}: {exc}"],
+        )
+        await self.cache.store_health(venue.value, symbol, health)
+        await self.repository.upsert_health(health)
+        VENUE_HEALTH.labels(venue=venue.value, symbol=symbol).set(0)
+        self.logger.warning("collector-symbol-failed", venue=venue.value, symbol=symbol, stage=stage, error=str(exc))

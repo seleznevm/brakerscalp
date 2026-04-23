@@ -15,6 +15,7 @@ async def amain() -> None:
         cache,
         universe,
         settings.poll_interval_seconds,
+        symbol_concurrency=settings.collector_symbol_concurrency,
         exchange_book_depth=settings.exchange_book_depth,
         exchange_trades_limit=settings.exchange_trades_limit,
     )

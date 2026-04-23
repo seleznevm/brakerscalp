@@ -59,6 +59,7 @@ docker compose up --build
 ## Main services
 
 - `collector` polls public market data from Binance, Bybit and OKX and normalizes it.
+- `collector` gathers full candles/book/trades/derivatives from each symbol's `primary_venue`, while secondary venues stay in lightweight health-check mode so the bot can cover the whole universe instead of stalling on one market.
 - `engine` computes levels from 4h/1h candles, validates 15m/5m triggers and enqueues alerts.
 - `bot` consumes the persistent outbox and serves `/start`, `/status`, `/last`, `/mute`, `/unmute`, `/health`.
 - `bot` also supports `/config`, `/help`, `/pending`, `/chatinfo` and `/testalert` for VPS verification and delivery recovery checks.

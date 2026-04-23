@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = ""
     poll_interval_seconds: int = 30
+    collector_symbol_concurrency: int = 6
     engine_interval_seconds: int = 20
     signal_duplicate_window_minutes: int = 180
     api_host: str = "0.0.0.0"
