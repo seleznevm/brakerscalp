@@ -30,8 +30,9 @@ def configure_logging(level: str = "INFO") -> None:
         stream=sys.stdout,
         format="%(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def get_logger(name: str):
     return structlog.get_logger(name)
-

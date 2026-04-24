@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: brakerscalp
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: ${POSTGRES_DB:-brakerscalp}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d brakerscalp"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-admin} -d ${POSTGRES_DB:-brakerscalp}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -19,10 +19,11 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - ./redis-data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+      - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -68,7 +69,7 @@ services:
     env_file: [.env]
     command: ["python", "-m", "brakerscalp.app.api"]
     ports:
-      - "8080:8080"
+      - "${API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,8 +96,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - ./grafana-data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -105,3 +106,33 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  pgadmin:
+    image: dpage/pgadmin4:8
+    profiles: ["ui"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
+      PGADMIN_CONFIG_LOGIN_BANNER: '"BrakerScalp PostgreSQL UI"'
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - ./pgadmin-data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    profiles: ["ui"]
+    environment:
+      REDIS_HOSTS: local:redis:6379
+      HTTP_USER: ${REDIS_COMMANDER_USER:-admin}
+      HTTP_PASSWORD: ${REDIS_COMMANDER_PASSWORD:-admin}
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped

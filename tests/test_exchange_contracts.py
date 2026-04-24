@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from brakerscalp.domain.models import Timeframe
+from datetime import datetime, timezone
+
+from brakerscalp.domain.models import BookSnapshot, Timeframe, Venue
 from brakerscalp.exchanges.binance import BinanceAdapter
 from brakerscalp.exchanges.bybit import BybitAdapter
 from brakerscalp.exchanges.okx import OkxAdapter
@@ -32,6 +34,20 @@ def test_okx_book_contract() -> None:
     book = adapter.parse_book_payload("BTCUSDT", read_fixture("okx_book.json"))
     assert book.sequence_id == "78901"
     assert book.asks[0].price == 65020.5
+
+
+def test_book_snapshot_coerces_numeric_sequence_id() -> None:
+    book = BookSnapshot.model_validate(
+        {
+            "symbol": "BTCUSDT",
+            "venue": Venue.OKX,
+            "timestamp": datetime.now(tz=timezone.utc),
+            "sequence_id": 123456,
+            "bids": [{"price": 1.0, "size": 2.0}],
+            "asks": [{"price": 1.1, "size": 3.0}],
+        }
+    )
+    assert book.sequence_id == "123456"
 
 
 def test_binance_candle_contract() -> None:

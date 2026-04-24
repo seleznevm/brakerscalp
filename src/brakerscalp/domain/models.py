@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utcnow() -> datetime:
@@ -81,6 +81,13 @@ class BookSnapshot(BaseModel):
     asks: list[OrderBookLevel]
     sequence_id: str | None = None
     is_gap: bool = False
+
+    @field_validator("sequence_id", mode="before")
+    @classmethod
+    def coerce_sequence_id(cls, value):
+        if value in (None, ""):
+            return None
+        return str(value)
 
     @property
     def best_bid(self) -> float:
