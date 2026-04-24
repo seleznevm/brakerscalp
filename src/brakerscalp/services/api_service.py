@@ -10,12 +10,16 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from brakerscalp.config import Settings
+from brakerscalp.domain.models import UniverseSymbol, Venue
 from brakerscalp.services.market_inspector import ManualScanResult, MarketInspector
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.repository import Repository
+from brakerscalp.universe import save_universe
 
 
 STATUS_LABELS = {
@@ -170,8 +174,14 @@ def build_api(
         limit: int = Query(default=24, ge=1, le=100),
         status: str = Query(default="all", pattern="^(all|pending|success|failed)$"),
         q: str = Query(default=""),
+        min_confidence: float | None = Query(default=None, ge=0.0, le=100.0),
     ) -> HTMLResponse:
-        setups = await inspector.list_active_setups(limit=limit, outcome_filter=status, symbol_query=q)
+        setups = await inspector.list_active_setups(
+            limit=limit,
+            outcome_filter=status,
+            symbol_query=q,
+            minimum_confidence=min_confidence,
+        )
         cards = "".join(_setup_card(item, local_tz, include_meta=True) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
         body = f"""
         <section class="hero compact">
@@ -181,7 +191,7 @@ def build_api(
             <p class="hero-copy">Последние actionable и watchlist сигналы с графиками, точкой входа, SL, TP и статусом отработки.</p>
           </div>
         </section>
-        <section class="panel">{_setups_filter_form(status=status, symbol_query=q, limit=limit)}</section>
+        <section class="panel">{_setups_filter_form(status=status, symbol_query=q, limit=limit, min_confidence=min_confidence)}</section>
         <section class="setup-grid large">{cards}</section>
         """
         return HTMLResponse(_page("Сетапы", "setups", body, refresh_seconds=30))
@@ -210,10 +220,17 @@ def build_api(
         return HTMLResponse(_page("Скринер", "screener", body, refresh_seconds=25))
 
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(symbol: str | None = None, threshold_saved: int = 0) -> HTMLResponse:
+    async def settings_page(
+        symbol: str | None = None,
+        threshold_saved: int = 0,
+        manage_symbol: str | None = None,
+        universe_saved: str | None = None,
+    ) -> HTMLResponse:
         scan = await inspector.manual_scan(symbol) if symbol else None
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         manual_card = _manual_scan_card(symbol, scan, local_tz) if symbol else _manual_scan_form("")
+        runtime_universe = await inspector.list_universe()
+        discovered_symbol, venue_probes = await inspector.discover_symbol_venues(manage_symbol or "") if manage_symbol else ("", [])
         body = f"""
         <section class="hero compact">
           <div>
@@ -237,6 +254,9 @@ def build_api(
               <span class="muted">Проверка идет через cache или live adapter.</span>
             </div>
             {manual_card}
+            {_universe_manage_form(manage_symbol or "", universe_saved)}
+            {_discovered_venues_block(discovered_symbol, venue_probes)}
+            {_universe_table(runtime_universe)}
           </div>
         </section>
         """
@@ -246,6 +266,30 @@ def build_api(
     async def apply_threshold(value: float = Query(ge=0.0, le=100.0)) -> RedirectResponse:
         await cache.set_minimum_alert_confidence(value)
         return RedirectResponse(url="/settings?threshold_saved=1", status_code=303)
+
+    @app.get("/settings/universe/add")
+    async def add_universe_symbol(symbol: str, venue: str) -> RedirectResponse:
+        normalized = inspector.normalize_symbol(symbol)
+        selected_venue = Venue(venue.lower())
+        current = await inspector.list_universe()
+        updated_map = {item.symbol.upper(): item for item in current}
+        new_item = UniverseSymbol(symbol=normalized, primary_venue=selected_venue)
+        updated_map[normalized] = new_item
+        updated = sorted(updated_map.values(), key=lambda item: (item.primary_venue.value, item.symbol))
+        await repository.upsert_runtime_universe_symbol(new_item)
+        await cache.store_universe(updated)
+        save_universe(settings.universe_path, updated)
+        return RedirectResponse(url=f"/settings?manage_symbol={quote_plus(normalized)}&universe_saved=added", status_code=303)
+
+    @app.get("/settings/universe/remove")
+    async def remove_universe_symbol(symbol: str) -> RedirectResponse:
+        normalized = inspector.normalize_symbol(symbol)
+        current = await inspector.list_universe()
+        updated = [item for item in current if item.symbol.upper() != normalized.upper()]
+        await repository.remove_runtime_universe_symbol(normalized)
+        await cache.store_universe(updated)
+        save_universe(settings.universe_path, updated)
+        return RedirectResponse(url=f"/settings?manage_symbol={quote_plus(normalized)}&universe_saved=removed", status_code=303)
 
     @app.get("/statistics", response_class=HTMLResponse)
     async def statistics_page(
@@ -307,12 +351,14 @@ def build_api(
     ) -> Response:
         start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
         snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
+        export_rows = await _statistics_export_rows(repository, inspector, local_tz, start_utc, end_utc, q)
         workbook = _statistics_workbook(
             snapshot=snapshot,
             range_name=range,
             start_local=start_local,
             end_local=end_local,
             symbol_query=q,
+            export_rows=export_rows,
         )
         filename = f"brakerscalp-statistics-{range}-{start_local.isoformat()}-{(end_local - timedelta(days=1)).isoformat()}.xlsx"
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
@@ -896,6 +942,15 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
     .setup-card .body {{
       padding: 16px 18px 18px;
     }}
+    .setup-footer {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }}
     .kv-grid {{
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1181,6 +1236,10 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False) -> str:
         <ul class="bullets">{reason_lines}</ul>
         <h3>Почему не выше</h3>
         <ul class="bullets">{why_lines}</ul>
+        <div class="setup-footer">
+          <span class="muted">Call time</span>
+          <strong>{_format_dt(signal.detected_at, local_tz)}</strong>
+        </div>
       </div>
     </article>
     """
@@ -1274,12 +1333,13 @@ def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
     """
 
 
-def _setups_filter_form(*, status: str, symbol_query: str, limit: int) -> str:
+def _setups_filter_form(*, status: str, symbol_query: str, limit: int, min_confidence: float | None) -> str:
     selected = {"all": "", "pending": "", "success": "", "failed": ""}
     selected[status] = "selected"
     return f"""
     <form class="manual-form" method="get" action="/setups">
       <input type="text" name="q" value="{escape(symbol_query)}" placeholder="Filter by symbol, e.g. BTC">
+      <input type="number" name="min_confidence" min="0" max="100" step="0.1" value="{'' if min_confidence is None else f'{min_confidence:.1f}'}" placeholder="Min confidence">
       <input type="hidden" name="limit" value="{limit}">
       <select name="status" class="filter-select">
         <option value="all" {selected["all"]}>All statuses</option>
@@ -1394,6 +1454,94 @@ def _manual_scan_card(symbol: str | None, scan: ManualScanResult | None, local_t
     """
 
 
+def _universe_manage_form(value: str, universe_saved: str | None) -> str:
+    saved = ""
+    if universe_saved == "added":
+        saved = '<div class="muted">Token added to the runtime universe.</div>'
+    elif universe_saved == "removed":
+        saved = '<div class="muted">Token removed from the runtime universe.</div>'
+    return f"""
+    <div class="scan-card">
+      <h3>Universe Management</h3>
+      <div class="muted">Enter a token symbol, check where it exists, then add it with a chosen primary venue.</div>
+      <form class="manual-form" method="get" action="/settings">
+        <input type="text" name="manage_symbol" value="{escape(value)}" placeholder="For example: BTC, ETHUSDT, WIFUSDT">
+        <button type="submit">Find venues</button>
+      </form>
+      {saved}
+    </div>
+    """
+
+
+def _discovered_venues_block(symbol: str, probes: list) -> str:
+    if not symbol:
+        return ""
+    cards = []
+    for item in probes:
+        action = (
+            f'<a class="button-link" href="/settings/universe/add?symbol={quote_plus(symbol)}&venue={quote_plus(item.venue)}">Add via {escape(item.venue.upper())}</a>'
+            if item.available
+            else ""
+        )
+        cards.append(
+            f"""
+            <article class="service-card">
+              <div class="panel-head">
+                <h3>{escape(item.venue.upper())}</h3>
+                {_status_badge("online" if item.available else "offline")}
+              </div>
+              <div class="muted">{escape(item.message)}</div>
+              {action}
+            </article>
+            """
+        )
+    return f"""
+    <div class="scan-card">
+      <div class="panel-head">
+        <h3>Venue discovery for {escape(symbol)}</h3>
+        <span class="muted">{len(probes)} venue checks</span>
+      </div>
+      <div class="service-grid">{''.join(cards)}</div>
+    </div>
+    """
+
+
+def _universe_table(items: list[UniverseSymbol]) -> str:
+    if not items:
+        return _empty_block("Universe is empty.")
+    rows = []
+    for item in items:
+        rows.append(
+            f"""
+            <tr>
+              <td><strong>{escape(item.symbol)}</strong></td>
+              <td>{escape(item.primary_venue.value.upper())}</td>
+              <td><a href="/settings/universe/remove?symbol={quote_plus(item.symbol)}">Remove</a></td>
+            </tr>
+            """
+        )
+    return f"""
+    <div class="scan-card">
+      <div class="panel-head">
+        <h3>Runtime Universe</h3>
+        <span class="muted">{len(items)} symbols</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Primary venue</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>
+    </div>
+    """
+
+
 def _statistics_range_links(*, selected: str, query: str) -> str:
     links = []
     for item, label in [("day", "Day"), ("week", "Week"), ("month", "Month"), ("custom", "Custom")]:
@@ -1480,7 +1628,54 @@ def _statistics_table(rows: list) -> str:
     """
 
 
-def _statistics_workbook(*, snapshot, range_name: str, start_local: date, end_local: date, symbol_query: str) -> BytesIO:
+async def _statistics_export_rows(
+    repository: Repository,
+    inspector: MarketInspector,
+    local_tz: ZoneInfo,
+    start_at: datetime,
+    end_at: datetime,
+    symbol_query: str,
+) -> list[dict[str, Any]]:
+    signals = await repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
+    query = symbol_query.strip().upper()
+    rows: list[dict[str, Any]] = []
+    for signal in signals:
+        if query and query not in signal.symbol.upper():
+            continue
+        simulation = await inspector.simulate_trade(signal, end_at=end_at)
+        trigger = ""
+        if signal.render_context:
+            trigger = str(signal.render_context.get("trigger", ""))
+        rows.append(
+            {
+                "Call date": _format_date(signal.detected_at, local_tz),
+                "Call time": _format_time(signal.detected_at, local_tz),
+                "Symbol": signal.symbol,
+                "Venue": signal.venue.upper(),
+                "Setup": signal.setup.upper(),
+                "Direction": signal.direction.upper(),
+                "Signal class": signal.signal_class,
+                "Confidence": round(float(signal.confidence), 2),
+                "Outcome": simulation.outcome,
+                "Trigger": trigger,
+                "Rationale": "\n".join(signal.rationale or []),
+                "Entry date": _format_date(simulation.entry_at, local_tz),
+                "Entry time": _format_time(simulation.entry_at, local_tz),
+                "TP1 date": _format_date(simulation.tp1_at, local_tz),
+                "TP1 time": _format_time(simulation.tp1_at, local_tz),
+                "TP2 date": _format_date(simulation.tp2_at, local_tz),
+                "TP2 time": _format_time(simulation.tp2_at, local_tz),
+                "SL date": _format_date(simulation.sl_at, local_tz),
+                "SL time": _format_time(simulation.sl_at, local_tz),
+                "Exit reason": simulation.exit_reason or "",
+                "Final PnL %": "" if simulation.pnl_pct is None else round(simulation.pnl_pct, 4),
+                "Trade duration": _format_duration(simulation.duration_seconds),
+            }
+        )
+    return rows
+
+
+def _statistics_workbook(*, snapshot, range_name: str, start_local: date, end_local: date, symbol_query: str, export_rows: list[dict[str, Any]]) -> BytesIO:
     summary_df = pd.DataFrame(
         [
             {"Metric": "Range", "Value": range_name},
@@ -1514,10 +1709,21 @@ def _statistics_workbook(*, snapshot, range_name: str, start_local: date, end_lo
             for item in snapshot.rows
         ]
     )
+    signals_df = pd.DataFrame(export_rows)
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="summary", index=False)
         rows_df.to_excel(writer, sheet_name="by_symbol", index=False)
+        signals_df.to_excel(writer, sheet_name="signals", index=False)
+        for worksheet in writer.book.worksheets:
+            for column in worksheet.columns:
+                letter = get_column_letter(column[0].column)
+                max_length = 0
+                for cell in column:
+                    if cell.value is not None:
+                        max_length = max(max_length, len(str(cell.value)))
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+                worksheet.column_dimensions[letter].width = min(max(max_length + 2, 12), 80)
     buffer.seek(0)
     return buffer
 
@@ -1530,6 +1736,30 @@ def _format_dt(value: datetime, local_tz: ZoneInfo) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(local_tz).strftime("%d.%m.%Y %H:%M:%S")
+
+
+def _format_date(value: datetime | None, local_tz: ZoneInfo) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(local_tz).strftime("%Y-%m-%d")
+
+
+def _format_time(value: datetime | None, local_tz: ZoneInfo) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(local_tz).strftime("%H:%M:%S")
+
+
+def _format_duration(duration_seconds: int | None) -> str:
+    if duration_seconds is None:
+        return ""
+    hours, remainder = divmod(duration_seconds, 3600)
+    minutes = remainder // 60
+    return f"{hours}h {minutes}m"
 
 
 def _format_delivery_counts(counts: dict[str, int]) -> str:

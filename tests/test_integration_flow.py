@@ -95,3 +95,27 @@ async def test_engine_respects_runtime_minimum_alert_confidence(repository, cach
     assert alerts
     queued = await cache.pop_alert(timeout=1)
     assert queued is None
+
+
+async def test_engine_uses_runtime_universe_from_cache(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+    constructor_universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
+    runtime_universe = [UniverseSymbol(symbol="ETHUSDT", primary_venue=Venue.BINANCE)]
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market(symbol="ETHUSDT")
+
+    await cache.store_universe(runtime_universe)
+    await cache.store_candles("binance", "ETHUSDT", "4h", candles_4h)
+    await cache.store_candles("binance", "ETHUSDT", "1h", candles_1h)
+    await cache.store_candles("binance", "ETHUSDT", "15m", candles_15m)
+    await cache.store_candles("binance", "ETHUSDT", "5m", candles_5m)
+    await cache.store_book("binance", "ETHUSDT", make_book(symbol="ETHUSDT"))
+    await cache.store_derivative_context("binance", "ETHUSDT", make_derivatives(symbol="ETHUSDT"))
+    await cache.store_health("binance", "ETHUSDT", make_health(symbol="ETHUSDT"))
+    await cache.store_health("bybit", "ETHUSDT", make_health(symbol="ETHUSDT", venue=Venue.BYBIT))
+    await cache.store_health("okx", "ETHUSDT", make_health(symbol="ETHUSDT", venue=Venue.OKX))
+
+    service = EngineService(repository, cache, constructor_universe, alert_chat_ids=[123], interval_seconds=1)
+    await service.run_once()
+    alerts = await repository.list_latest_alerts()
+
+    assert alerts
+    assert alerts[0].symbol == "ETHUSDT"

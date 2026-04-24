@@ -6,8 +6,8 @@ from sqlalchemy import Select, delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from brakerscalp.domain.models import AlertMessage, DataHealth, LevelCandidate, MarketCandle, SignalDecision
-from brakerscalp.storage.models import AlertDeliveryRecord, CandleRecord, LevelRecord, SignalRecord, VenueHealthRecord
+from brakerscalp.domain.models import AlertMessage, DataHealth, LevelCandidate, MarketCandle, SignalDecision, UniverseSymbol, Venue
+from brakerscalp.storage.models import AlertDeliveryRecord, CandleRecord, LevelRecord, RuntimeUniverseRecord, SignalRecord, VenueHealthRecord
 
 
 class Repository:
@@ -387,3 +387,51 @@ class Repository:
             stmt: Select[tuple[int]] = select(func.count()).select_from(SignalRecord)
             result = await session.execute(stmt)
             return int(result.scalar_one())
+
+    async def list_runtime_universe(self, enabled_venues: list[str] | None = None) -> list[UniverseSymbol]:
+        async with self.session_factory() as session:
+            stmt = select(RuntimeUniverseRecord).order_by(RuntimeUniverseRecord.primary_venue.asc(), RuntimeUniverseRecord.symbol.asc())
+            if enabled_venues:
+                stmt = stmt.where(RuntimeUniverseRecord.primary_venue.in_(enabled_venues))
+            result = await session.execute(stmt)
+            rows = list(result.scalars())
+            return [
+                UniverseSymbol(symbol=item.symbol, primary_venue=Venue(item.primary_venue))
+                for item in rows
+            ]
+
+    async def replace_runtime_universe(self, symbols: list[UniverseSymbol]) -> None:
+        async with self.session_factory() as session:
+            await session.execute(delete(RuntimeUniverseRecord))
+            await session.flush()
+            for item in symbols:
+                session.add(
+                    RuntimeUniverseRecord(
+                        symbol=item.symbol,
+                        primary_venue=item.primary_venue.value,
+                    )
+                )
+            await session.commit()
+
+    async def upsert_runtime_universe_symbol(self, symbol: UniverseSymbol) -> None:
+        async with self.session_factory() as session:
+            existing = await session.scalar(
+                select(RuntimeUniverseRecord).where(RuntimeUniverseRecord.symbol == symbol.symbol)
+            )
+            if existing is None:
+                session.add(
+                    RuntimeUniverseRecord(
+                        symbol=symbol.symbol,
+                        primary_venue=symbol.primary_venue.value,
+                    )
+                )
+            else:
+                existing.primary_venue = symbol.primary_venue.value
+            await session.commit()
+
+    async def remove_runtime_universe_symbol(self, symbol: str) -> None:
+        async with self.session_factory() as session:
+            await session.execute(
+                delete(RuntimeUniverseRecord).where(RuntimeUniverseRecord.symbol == symbol)
+            )
+            await session.commit()

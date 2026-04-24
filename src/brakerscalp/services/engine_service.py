@@ -56,8 +56,9 @@ class EngineService:
         stale_count = 0
         total = 0
         detected = 0
+        runtime_universe = await self._current_universe()
         runtime_minimum_alert_confidence = await self._runtime_minimum_alert_confidence()
-        for item in self.universe:
+        for item in runtime_universe:
             total += 1
             stale, has_signal = await self._process_symbol(item, runtime_minimum_alert_confidence)
             if stale:
@@ -165,6 +166,14 @@ class EngineService:
         if hasattr(self.cache, "get_minimum_alert_confidence"):
             return await self.cache.get_minimum_alert_confidence(self.minimum_alert_confidence)
         return self.minimum_alert_confidence
+
+    async def _current_universe(self) -> list[UniverseSymbol]:
+        allowed_venues = {item.primary_venue for item in self.universe}
+        if hasattr(self.cache, "get_universe_symbols"):
+            runtime_universe = await self.cache.get_universe_symbols(self.universe)
+            if runtime_universe:
+                return [item for item in runtime_universe if item.primary_venue in allowed_venues]
+        return [item for item in self.universe if item.primary_venue in allowed_venues]
 
     def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
         now = datetime.now(tz=timezone.utc)

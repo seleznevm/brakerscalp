@@ -41,18 +41,19 @@ class CollectorService:
             await asyncio.sleep(self.poll_interval_seconds)
 
     async def collect_once(self) -> None:
+        runtime_universe = await self._current_universe()
         semaphore = asyncio.Semaphore(self.symbol_concurrency)
 
         async def _collect(item: UniverseSymbol) -> None:
             async with semaphore:
                 await self._collect_universe_symbol(item)
 
-        await asyncio.gather(*[_collect(item) for item in self.universe])
+        await asyncio.gather(*[_collect(item) for item in runtime_universe])
         if hasattr(self.cache, "store_service_heartbeat"):
             await self.cache.store_service_heartbeat(
                 "collector",
                 {
-                    "symbols": len(self.universe),
+                    "symbols": len(runtime_universe),
                     "concurrency": self.symbol_concurrency,
                 },
             )
@@ -132,3 +133,11 @@ class CollectorService:
         await self.repository.upsert_health(health)
         VENUE_HEALTH.labels(venue=venue.value, symbol=symbol).set(0)
         self.logger.warning("collector-symbol-failed", venue=venue.value, symbol=symbol, stage=stage, error=str(exc))
+
+    async def _current_universe(self) -> list[UniverseSymbol]:
+        allowed_venues = set(self.adapters)
+        if hasattr(self.cache, "get_universe_symbols"):
+            runtime_universe = await self.cache.get_universe_symbols(self.universe)
+            if runtime_universe:
+                return [item for item in runtime_universe if item.primary_venue in allowed_venues]
+        return [item for item in self.universe if item.primary_venue in allowed_venues]

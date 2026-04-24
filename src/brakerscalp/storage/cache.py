@@ -5,7 +5,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from brakerscalp.domain.models import AlertMessage, BookSnapshot, DataHealth, DerivativeContext, MarketCandle, TradeTick
+from brakerscalp.domain.models import AlertMessage, BookSnapshot, DataHealth, DerivativeContext, MarketCandle, TradeTick, UniverseSymbol
 from brakerscalp.serialization import dumps, loads
 
 
@@ -115,3 +115,18 @@ class StateCache:
             return float(raw)
         except (TypeError, ValueError):
             return float(default)
+
+    async def store_universe(self, symbols: list[UniverseSymbol]) -> None:
+        await self.set_json(
+            self._key("runtime", "universe"),
+            [item.model_dump(mode="json") for item in symbols],
+        )
+
+    async def get_universe(self) -> list[dict]:
+        return await self.get_json(self._key("runtime", "universe")) or []
+
+    async def get_universe_symbols(self, fallback: list[UniverseSymbol] | None = None) -> list[UniverseSymbol]:
+        raw = await self.get_universe()
+        if raw:
+            return [UniverseSymbol.model_validate(item) for item in raw]
+        return list(fallback or [])

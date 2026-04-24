@@ -115,3 +115,11 @@ class VenueHealthRecord(Base):
     freshness_ms: Mapped[int] = mapped_column(Integer)
     reconnect_count: Mapped[int] = mapped_column(Integer)
     notes: Mapped[list] = mapped_column(JSON)
+
+
+class RuntimeUniverseRecord(Base):
+    __tablename__ = "runtime_universe"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    primary_venue: Mapped[str] = mapped_column(String(32), index=True)
