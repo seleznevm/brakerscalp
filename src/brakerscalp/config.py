@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     collector_symbol_concurrency: int = 6
     engine_interval_seconds: int = 20
     signal_duplicate_window_minutes: int = 180
+    minimum_alert_confidence: float = 65.0
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     exchange_request_timeout_seconds: float = 10.0

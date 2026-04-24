@@ -101,3 +101,17 @@ class StateCache:
 
     async def get_service_heartbeat(self, service: str) -> dict[str, Any] | None:
         return await self.get_json(self._key("heartbeat", service))
+
+    async def set_minimum_alert_confidence(self, value: float) -> None:
+        await self.redis.set(self._key("runtime", "minimum-alert-confidence"), str(float(value)).encode("utf-8"))
+
+    async def get_minimum_alert_confidence(self, default: float) -> float:
+        raw = await self.redis.get(self._key("runtime", "minimum-alert-confidence"))
+        if raw in (None, b"", ""):
+            return float(default)
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            return float(raw)
+        except (TypeError, ValueError):
+            return float(default)

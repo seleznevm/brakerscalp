@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -26,6 +27,34 @@ class ManualScanResult:
 class SetupCard:
     signal: SignalRecord
     outcome: str
+
+
+@dataclass(slots=True)
+class StatisticsRow:
+    symbol: str
+    total: int
+    success: int
+    failed: int
+    pending: int
+    actionable: int
+    watchlist: int
+    avg_confidence: float
+    win_rate: float
+
+
+@dataclass(slots=True)
+class StatisticsSnapshot:
+    start_at: datetime
+    end_at: datetime
+    total: int
+    success: int
+    failed: int
+    pending: int
+    actionable: int
+    watchlist: int
+    avg_confidence: float
+    win_rate: float
+    rows: list[StatisticsRow]
 
 
 @dataclass(slots=True)
@@ -108,16 +137,112 @@ class MarketInspector:
             return ManualScanResult(source=f"live:{venue.value}", report=self.rule_engine.inspect(payload), errors=errors)
         return ManualScanResult(source="unavailable", report=None, errors=errors or ["Не удалось загрузить данные по символу."])
 
-    async def list_active_setups(self, within_hours: int = 72, limit: int = 24) -> list[SetupCard]:
+    async def list_active_setups(
+        self,
+        within_hours: int = 72,
+        limit: int = 24,
+        outcome_filter: str = "all",
+        symbol_query: str | None = None,
+    ) -> list[SetupCard]:
         end_at = datetime.now(tz=timezone.utc)
         start_at = end_at - timedelta(hours=within_hours)
         signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
         cards: list[SetupCard] = []
-        for signal in reversed(signals[-limit:]):
+        query = (symbol_query or "").strip().upper()
+        for signal in reversed(signals):
+            if query and query not in signal.symbol.upper():
+                continue
             candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, end_at)
-            cards.append(SetupCard(signal=signal, outcome=classify_signal_outcome(signal, candles)))
+            outcome = classify_signal_outcome(signal, candles)
+            if outcome_filter != "all" and outcome != outcome_filter:
+                continue
+            cards.append(SetupCard(signal=signal, outcome=outcome))
         outcome_order = {"pending": 0, "success": 1, "failed": 2}
-        return sorted(cards, key=lambda item: (outcome_order.get(item.outcome, 9), -item.signal.detected_at.timestamp()))
+        cards = sorted(cards, key=lambda item: (outcome_order.get(item.outcome, 9), -item.signal.detected_at.timestamp()))
+        return cards[:limit]
+
+    async def build_statistics(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        symbol_query: str | None = None,
+    ) -> StatisticsSnapshot:
+        signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
+        query = (symbol_query or "").strip().upper()
+        by_symbol: dict[str, dict[str, float]] = defaultdict(
+            lambda: {
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+                "pending": 0,
+                "actionable": 0,
+                "watchlist": 0,
+                "confidence_sum": 0.0,
+            }
+        )
+        overall = {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "pending": 0,
+            "actionable": 0,
+            "watchlist": 0,
+            "confidence_sum": 0.0,
+        }
+
+        for signal in signals:
+            if query and query not in signal.symbol.upper():
+                continue
+            candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, end_at)
+            outcome = classify_signal_outcome(signal, candles)
+            overall["total"] += 1
+            overall[outcome] += 1
+            overall[signal.signal_class] += 1
+            overall["confidence_sum"] += float(signal.confidence)
+
+            bucket = by_symbol[signal.symbol]
+            bucket["total"] += 1
+            bucket[outcome] += 1
+            bucket[signal.signal_class] += 1
+            bucket["confidence_sum"] += float(signal.confidence)
+
+        rows: list[StatisticsRow] = []
+        for symbol, values in by_symbol.items():
+            resolved = int(values["success"] + values["failed"])
+            win_rate = (float(values["success"]) / resolved * 100.0) if resolved else 0.0
+            avg_confidence = (float(values["confidence_sum"]) / float(values["total"])) if values["total"] else 0.0
+            rows.append(
+                StatisticsRow(
+                    symbol=symbol,
+                    total=int(values["total"]),
+                    success=int(values["success"]),
+                    failed=int(values["failed"]),
+                    pending=int(values["pending"]),
+                    actionable=int(values["actionable"]),
+                    watchlist=int(values["watchlist"]),
+                    avg_confidence=avg_confidence,
+                    win_rate=win_rate,
+                )
+            )
+        rows.sort(key=lambda item: (-item.total, -item.win_rate, item.symbol))
+
+        resolved = int(overall["success"] + overall["failed"])
+        overall_win_rate = (float(overall["success"]) / resolved * 100.0) if resolved else 0.0
+        overall_avg_confidence = (float(overall["confidence_sum"]) / float(overall["total"])) if overall["total"] else 0.0
+        return StatisticsSnapshot(
+            start_at=start_at,
+            end_at=end_at,
+            total=int(overall["total"]),
+            success=int(overall["success"]),
+            failed=int(overall["failed"]),
+            pending=int(overall["pending"]),
+            actionable=int(overall["actionable"]),
+            watchlist=int(overall["watchlist"]),
+            avg_confidence=overall_avg_confidence,
+            win_rate=overall_win_rate,
+            rows=rows,
+        )
 
     async def render_manual_chart(self, raw_symbol: str) -> bytes | None:
         scan = await self.manual_scan(raw_symbol)
@@ -171,6 +296,7 @@ class MarketInspector:
             render_context={
                 "level_lower": report.level_lower,
                 "level_upper": report.level_upper,
+                "chart_timeframe": Timeframe.M15.value,
             },
         )
 

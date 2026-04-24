@@ -29,6 +29,7 @@ class EngineService:
         signal_dedupe_ttl_seconds: int = 14400,
         alert_message_thread_id: int | None = None,
         signal_duplicate_window_minutes: int = 180,
+        minimum_alert_confidence: float = 65.0,
     ) -> None:
         self.repository = repository
         self.cache = cache
@@ -38,6 +39,7 @@ class EngineService:
         self.signal_dedupe_ttl_seconds = signal_dedupe_ttl_seconds
         self.alert_message_thread_id = alert_message_thread_id
         self.signal_duplicate_window_minutes = signal_duplicate_window_minutes
+        self.minimum_alert_confidence = minimum_alert_confidence
         self.level_detector = LevelDetector()
         self.rule_engine = RuleEngine()
         self.logger = get_logger("engine")
@@ -54,9 +56,10 @@ class EngineService:
         stale_count = 0
         total = 0
         detected = 0
+        runtime_minimum_alert_confidence = await self._runtime_minimum_alert_confidence()
         for item in self.universe:
             total += 1
-            stale, has_signal = await self._process_symbol(item)
+            stale, has_signal = await self._process_symbol(item, runtime_minimum_alert_confidence)
             if stale:
                 stale_count += 1
             if has_signal:
@@ -73,10 +76,11 @@ class EngineService:
                     "stale_symbols": stale_count,
                     "detected_signals": detected,
                     "signals_in_db": signal_count,
+                    "minimum_alert_confidence": runtime_minimum_alert_confidence,
                 },
             )
 
-    async def _process_symbol(self, symbol_config: UniverseSymbol) -> tuple[int, bool]:
+    async def _process_symbol(self, symbol_config: UniverseSymbol, runtime_minimum_alert_confidence: float) -> tuple[int, bool]:
         primary_venue = symbol_config.primary_venue.value
         symbol = symbol_config.symbol
         candles_4h = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "4h"), MarketCandle))
@@ -139,7 +143,14 @@ class EngineService:
 
         await self.repository.save_signal(decision)
         ALERTS_TOTAL.labels(signal_class=decision.signal_class.value, setup=decision.setup.value).inc()
-        if decision.signal_class != SignalClass.SUPPRESSED and await self.cache.acquire_alert_key(
+        if decision.confidence < runtime_minimum_alert_confidence:
+            self.logger.info(
+                "signal-below-runtime-threshold",
+                symbol=decision.symbol,
+                confidence=decision.confidence,
+                minimum_alert_confidence=runtime_minimum_alert_confidence,
+            )
+        elif decision.signal_class != SignalClass.SUPPRESSED and await self.cache.acquire_alert_key(
             decision.alert_key,
             ttl_seconds=self.signal_dedupe_ttl_seconds,
         ):
@@ -149,6 +160,11 @@ class EngineService:
                 await self.cache.enqueue_alert(alert)
         self.logger.info("signal-evaluated", symbol=symbol, signal_class=decision.signal_class.value, confidence=decision.confidence)
         return stale, True
+
+    async def _runtime_minimum_alert_confidence(self) -> float:
+        if hasattr(self.cache, "get_minimum_alert_confidence"):
+            return await self.cache.get_minimum_alert_confidence(self.minimum_alert_confidence)
+        return self.minimum_alert_confidence
 
     def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
         now = datetime.now(tz=timezone.utc)

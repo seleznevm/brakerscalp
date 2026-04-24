@@ -72,3 +72,26 @@ async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakou
     await service.run_once()
     second_alert = await cache.pop_alert(timeout=1)
     assert second_alert is None
+
+
+async def test_engine_respects_runtime_minimum_alert_confidence(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+    universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
+
+    await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
+    await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)
+    await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
+    await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
+    await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
+    await cache.store_health("binance", "BTCUSDT", make_health())
+    await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
+    await cache.store_health("okx", "BTCUSDT", make_health(venue=Venue.OKX))
+    await cache.set_minimum_alert_confidence(99.0)
+
+    service = EngineService(repository, cache, universe, alert_chat_ids=[123], interval_seconds=1, minimum_alert_confidence=65.0)
+    await service.run_once()
+    alerts = await repository.list_latest_alerts()
+    assert alerts
+    queued = await cache.pop_alert(timeout=1)
+    assert queued is None

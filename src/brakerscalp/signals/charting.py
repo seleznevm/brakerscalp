@@ -33,6 +33,7 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
         return None
 
     window = candles[-48:]
+    timeframe = str(signal.render_context.get("chart_timeframe", "15m"))
     level_lower = float(signal.render_context.get("level_lower", min(item.low for item in window)))
     level_upper = float(signal.render_context.get("level_upper", max(item.high for item in window)))
     entry = float(signal.entry_price)
@@ -45,6 +46,9 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
     ax.set_facecolor("#0f1720")
     ax.grid(True, color="#29404f", alpha=0.35, linewidth=0.6)
     ax.tick_params(colors="#d7e3ea", labelsize=8)
+    ax.yaxis.tick_right()
+    ax.yaxis.set_label_position("right")
+    ax.spines["left"].set_visible(False)
     for spine in ax.spines.values():
         spine.set_color("#3c5566")
 
@@ -84,7 +88,7 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
         bbox={"boxstyle": "round,pad=0.2", "fc": "#12212b", "ec": "#2c4759", "alpha": 0.95},
     )
 
-    ax.set_title(f"{signal.symbol} breakout scalp", color="#f7fbff", fontsize=12, pad=10)
+    ax.set_title(f"{signal.symbol}  |  {timeframe}  |  breakout scalp", color="#f7fbff", fontsize=12, pad=10, loc="left")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
     ax.tick_params(axis="x", rotation=20)
     ax.legend(facecolor="#12212b", edgecolor="#2c4759", labelcolor="#d7e3ea", fontsize=8, loc="upper left")

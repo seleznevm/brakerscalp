@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from typing import Any
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from brakerscalp.config import Settings
@@ -76,12 +76,14 @@ def build_api(
         delivery_counts = await repository.delivery_status_counts()
         signal_count = await repository.signal_count()
         actionable_24h, watchlist_24h = await _signal_stats(repository)
+        minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         cards = "".join(
             [
                 _metric_card("Сигналов в базе", str(signal_count), "Всего сохраненных решений."),
                 _metric_card("Actionable 24ч", str(actionable_24h), "Пробои, которые дошли до actionable."),
                 _metric_card("Watchlist 24ч", str(watchlist_24h), "Слабее actionable, но уже рядом с уровнем."),
                 _metric_card("Outbox", str(await cache.outbox_size()), _format_delivery_counts(delivery_counts)),
+                _metric_card("Min confidence", f"{minimum_alert_confidence:.1f}", "ÐœÐ¸Ð½Ð¸Ð¼Ð°Ð»ÑŒÐ½Ñ‹Ð¹ confidence Ð´Ð»Ñ Ð¾Ñ‚Ð¿Ñ€Ð°Ð²ÐºÐ¸ Ð² Telegram."),
             ]
         )
         opportunities = _opportunities_table(screener[:10], local_tz)
@@ -162,8 +164,12 @@ def build_api(
         return HTMLResponse(_page("Сервисы", "services", body, refresh_seconds=20))
 
     @app.get("/setups", response_class=HTMLResponse)
-    async def setups_page(limit: int = Query(default=24, ge=1, le=100)) -> HTMLResponse:
-        setups = await inspector.list_active_setups(limit=limit)
+    async def setups_page(
+        limit: int = Query(default=24, ge=1, le=100),
+        status: str = Query(default="all", pattern="^(all|pending|success|failed)$"),
+        q: str = Query(default=""),
+    ) -> HTMLResponse:
+        setups = await inspector.list_active_setups(limit=limit, outcome_filter=status, symbol_query=q)
         cards = "".join(_setup_card(item, local_tz, include_meta=True) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
         body = f"""
         <section class="hero compact">
@@ -173,6 +179,7 @@ def build_api(
             <p class="hero-copy">Последние actionable и watchlist сигналы с графиками, точкой входа, SL, TP и статусом отработки.</p>
           </div>
         </section>
+        <section class="panel">{_setups_filter_form(status=status, symbol_query=q, limit=limit)}</section>
         <section class="setup-grid large">{cards}</section>
         """
         return HTMLResponse(_page("Сетапы", "setups", body, refresh_seconds=30))
@@ -201,8 +208,9 @@ def build_api(
         return HTMLResponse(_page("Скринер", "screener", body, refresh_seconds=25))
 
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(symbol: str | None = None) -> HTMLResponse:
+    async def settings_page(symbol: str | None = None, threshold_saved: int = 0) -> HTMLResponse:
         scan = await inspector.manual_scan(symbol) if symbol else None
+        minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         manual_card = _manual_scan_card(symbol, scan, local_tz) if symbol else _manual_scan_form("")
         body = f"""
         <section class="hero compact">
@@ -218,7 +226,8 @@ def build_api(
               <h2>Текущая конфигурация</h2>
               <a href="/debug/runtime-config">JSON</a>
             </div>
-            {_settings_table(settings)}
+            {_settings_table(settings, minimum_alert_confidence)}
+            {_runtime_settings_form(minimum_alert_confidence, threshold_saved=bool(threshold_saved))}
           </div>
           <div class="panel">
             <div class="panel-head">
@@ -230,6 +239,61 @@ def build_api(
         </section>
         """
         return HTMLResponse(_page("Настройки", "settings", body, refresh_seconds=None))
+
+    @app.get("/settings/apply-threshold")
+    async def apply_threshold(value: float = Query(ge=0.0, le=100.0)) -> RedirectResponse:
+        await cache.set_minimum_alert_confidence(value)
+        return RedirectResponse(url="/settings?threshold_saved=1", status_code=303)
+
+    @app.get("/statistics", response_class=HTMLResponse)
+    async def statistics_page(
+        range: str = Query(default="day", pattern="^(day|week|month|custom)$"),
+        start: str | None = None,
+        end: str | None = None,
+        q: str = Query(default=""),
+    ) -> HTMLResponse:
+        start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
+        snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
+        body = f"""
+        <section class="hero compact">
+          <div>
+            <p class="eyebrow">Performance / Statistics</p>
+            <h1>Ð¡Ñ‚Ð°Ñ‚Ð¸ÑÑ‚Ð¸ÐºÐ° ÑÐµÑ‚Ð°Ð¿Ð¾Ð²</h1>
+            <p class="hero-copy">Ð¡Ð²Ð¾Ð´ÐºÐ° Ð¿Ð¾ Ð²Ñ‹Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ð¼, Ð¿Ñ€Ð¾Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ð¼ Ð¸ pending ÑÐµÑ‚Ð°Ð¿Ð°Ð¼ Ñ Ñ€Ð°Ð·Ð±Ð¸Ð²ÐºÐ¾Ð¹ Ð¿Ð¾ Ð¼Ð¾Ð½ÐµÑ‚Ð°Ð¼ Ð¸ Ð¿ÐµÑ€Ð¸Ð¾Ð´Ð°Ð¼.</p>
+          </div>
+          <div class="hero-meta">
+            {_statistics_range_links(selected=range, query=q)}
+          </div>
+        </section>
+        <section class="panel">
+          {_statistics_filter_form(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q)}
+        </section>
+        <section class="metrics-grid">
+          {_metric_card("Ð’ÑÐµÐ³Ð¾", str(snapshot.total), f"ÐŸÐµÑ€Ð¸Ð¾Ð´: {start_local.isoformat()} - {(end_local - timedelta(days=1)).isoformat()}")}
+          {_metric_card("Ð’Ñ‹Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ñ…", str(snapshot.success), "Ð¡ÐµÑ‚Ð°Ð¿Ñ‹, Ð³Ð´Ðµ Ñ†ÐµÐ½Ð° ÑÐ½Ð°Ñ‡Ð°Ð»Ð° Ð´Ð¾ÑˆÐ»Ð° Ð´Ð¾ T1.")}
+          {_metric_card("ÐŸÑ€Ð¾Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ñ…", str(snapshot.failed), "Ð¡ÐµÑ‚Ð°Ð¿Ñ‹, Ð³Ð´Ðµ Ð¿ÐµÑ€Ð²Ð¾Ð¹ ÑÑ€Ð°Ð±Ð¾Ñ‚Ð°Ð»Ð° Ð¸Ð½Ð²Ð°Ð»Ð¸Ð´Ð°Ñ†Ð¸Ñ.")}
+          {_metric_card("Winrate", f"{snapshot.win_rate:.1f}%", "Ð¡Ñ‡Ð¸Ñ‚Ð°ÐµÑ‚ÑÑ Ñ‚Ð¾Ð»ÑŒÐºÐ¾ Ð¿Ð¾ resolved ÑÐµÑ‚Ð°Ð¿Ð°Ð¼.")}
+          {_metric_card("Pending", str(snapshot.pending), "Ð¡Ð¸Ð³Ð½Ð°Ð»Ñ‹, ÐºÐ¾Ñ‚Ð¾Ñ€Ñ‹Ðµ ÐµÑ‰Ðµ Ð² Ñ€Ð°Ð±Ð¾Ñ‚Ðµ.")}
+          {_metric_card("Avg confidence", f"{snapshot.avg_confidence:.1f}", "Ð¡Ñ€ÐµÐ´Ð½Ð¸Ð¹ confidence Ð¿Ð¾ Ð²Ñ‹Ð±Ñ€Ð°Ð½Ð½Ð¾Ð¼Ñƒ Ð¿ÐµÑ€Ð¸Ð¾Ð´Ñƒ.")}
+        </section>
+        <section class="two-col">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Ð¡Ð²Ð¾Ð´ÐºÐ° Ð´Ð¸Ð°Ð¿Ð°Ð·Ð¾Ð½Ð°</h2>
+              <span class="muted">Actionable: {snapshot.actionable} · Watchlist: {snapshot.watchlist}</span>
+            </div>
+            {_statistics_overview(snapshot)}
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>ÐŸÐ¾ Ð¼Ð¾Ð½ÐµÑ‚Ð°Ð¼</h2>
+              <span class="muted">Ð¤Ð¸Ð»ÑŒÑ‚Ñ€: {escape(q or 'Ð½Ðµ Ð·Ð°Ð´Ð°Ð½')}</span>
+            </div>
+            {_statistics_table(snapshot.rows)}
+          </div>
+        </section>
+        """
+        return HTMLResponse(_page("Ð¡Ñ‚Ð°Ñ‚Ð¸ÑÑ‚Ð¸ÐºÐ°", "statistics", body, refresh_seconds=60))
 
     @app.get("/charts/signal/{decision_id}.png")
     async def signal_chart(decision_id: str) -> Response:
@@ -339,6 +403,7 @@ def build_api(
 
     @app.get("/debug/runtime-config")
     async def debug_runtime_config() -> JSONResponse:
+        minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         return JSONResponse(
             {
                 "app_name": settings.app_name,
@@ -350,6 +415,8 @@ def build_api(
                 "alert_message_thread_id": settings.alert_message_thread_id,
                 "poll_interval_seconds": settings.poll_interval_seconds,
                 "engine_interval_seconds": settings.engine_interval_seconds,
+                "minimum_alert_confidence": settings.minimum_alert_confidence,
+                "runtime_minimum_alert_confidence": minimum_alert_confidence,
                 "exchange_book_depth": settings.exchange_book_depth,
                 "exchange_trades_limit": settings.exchange_trades_limit,
                 "universe_path": str(settings.universe_path),
@@ -373,6 +440,45 @@ async def _signal_stats(repository: Repository) -> tuple[int, int]:
     actionable = sum(1 for item in signals if item.signal_class == "actionable")
     watchlist = sum(1 for item in signals if item.signal_class == "watchlist")
     return actionable, watchlist
+
+
+async def _current_minimum_alert_confidence(cache: StateCache, settings: Settings) -> float:
+    if hasattr(cache, "get_minimum_alert_confidence"):
+        return await cache.get_minimum_alert_confidence(settings.minimum_alert_confidence)
+    return settings.minimum_alert_confidence
+
+
+def _resolve_statistics_window(
+    *,
+    range_name: str,
+    start: str | None,
+    end: str | None,
+    local_tz: ZoneInfo,
+) -> tuple[date, date, datetime, datetime]:
+    today_local = datetime.now(local_tz).date()
+    if range_name == "week":
+        start_local = today_local - timedelta(days=6)
+        end_local = today_local + timedelta(days=1)
+    elif range_name == "month":
+        start_local = today_local - timedelta(days=29)
+        end_local = today_local + timedelta(days=1)
+    elif range_name == "custom" and start and end:
+        try:
+            start_local = date.fromisoformat(start)
+            end_local = date.fromisoformat(end) + timedelta(days=1)
+        except ValueError:
+            start_local = today_local
+            end_local = today_local + timedelta(days=1)
+    else:
+        start_local = today_local
+        end_local = today_local + timedelta(days=1)
+
+    if end_local <= start_local:
+        end_local = start_local + timedelta(days=1)
+
+    start_dt = datetime.combine(start_local, datetime.min.time(), tzinfo=local_tz).astimezone(timezone.utc)
+    end_dt = datetime.combine(end_local, datetime.min.time(), tzinfo=local_tz).astimezone(timezone.utc)
+    return start_local, end_local, start_dt, end_dt
 
 
 async def _service_statuses(repository: Repository, cache: StateCache, settings: Settings, local_tz: ZoneInfo) -> list[dict[str, Any]]:
@@ -809,7 +915,8 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       margin-bottom: 14px;
       flex-wrap: wrap;
     }}
-    .manual-form input {{
+    .manual-form input,
+    .manual-form select {{
       flex: 1 1 220px;
       min-width: 220px;
       padding: 14px 16px;
@@ -886,6 +993,7 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
         {_nav_link("/setups", "setups", active_tab, "Сетапы")}
         {_nav_link("/screener", "screener", active_tab, "Скринер")}
         {_nav_link("/settings", "settings", active_tab, "Настройки")}
+        {_nav_link("/statistics", "statistics", active_tab, "Statistics")}
       </nav>
     </header>
     {body}
@@ -1119,13 +1227,33 @@ def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
     """
 
 
-def _settings_table(settings: Settings) -> str:
+def _setups_filter_form(*, status: str, symbol_query: str, limit: int) -> str:
+    selected = {"all": "", "pending": "", "success": "", "failed": ""}
+    selected[status] = "selected"
+    return f"""
+    <form class="manual-form" method="get" action="/setups">
+      <input type="text" name="q" value="{escape(symbol_query)}" placeholder="Filter by symbol, e.g. BTC">
+      <input type="hidden" name="limit" value="{limit}">
+      <select name="status" class="filter-select">
+        <option value="all" {selected["all"]}>All statuses</option>
+        <option value="pending" {selected["pending"]}>In progress</option>
+        <option value="success" {selected["success"]}>TP1 reached</option>
+        <option value="failed" {selected["failed"]}>Invalidation</option>
+      </select>
+      <button type="submit">Apply</button>
+    </form>
+    """
+
+
+def _settings_table(settings: Settings, minimum_alert_confidence: float) -> str:
     rows = [
         ("Окружение", settings.environment),
         ("Timezone", settings.timezone),
         ("Биржи", ", ".join(settings.enabled_venues)),
         ("Collector interval", f"{settings.poll_interval_seconds}s"),
         ("Engine interval", f"{settings.engine_interval_seconds}s"),
+        ("Min confidence env", f"{settings.minimum_alert_confidence:.1f}"),
+        ("Min confidence runtime", f"{minimum_alert_confidence:.1f}"),
         ("API bind", f"{settings.api_host}:{settings.api_port}"),
         ("Universe path", str(settings.universe_path)),
         ("Alert chats", ", ".join(map(str, settings.effective_alert_chat_ids))),
@@ -1142,6 +1270,21 @@ def _settings_table(settings: Settings) -> str:
       <table class="settings-table">
         <tbody>{rendered}</tbody>
       </table>
+    </div>
+    """
+
+
+def _runtime_settings_form(minimum_alert_confidence: float, *, threshold_saved: bool) -> str:
+    saved = "<div class=\"muted\">Threshold saved. Engine will apply it on the next cycle.</div>" if threshold_saved else ""
+    return f"""
+    <div class="scan-card">
+      <h3>Telegram send threshold</h3>
+      <div class="muted">Signals below this confidence remain in the database, but are not enqueued for Telegram delivery.</div>
+      <form class="manual-form" method="get" action="/settings/apply-threshold">
+        <input type="number" name="value" min="0" max="100" step="0.1" value="{minimum_alert_confidence:.1f}">
+        <button type="submit">Apply threshold</button>
+      </form>
+      {saved}
     </div>
     """
 
@@ -1200,6 +1343,82 @@ def _manual_scan_card(symbol: str | None, scan: ManualScanResult | None, local_t
       <ul class="bullets">{notes}</ul>
       {error_section}
       {chart_block}
+    </div>
+    """
+
+
+def _statistics_range_links(*, selected: str, query: str) -> str:
+    links = []
+    for item, label in [("day", "Day"), ("week", "Week"), ("month", "Month"), ("custom", "Custom")]:
+        active = "is-active" if item == selected else ""
+        href = f"/statistics?range={item}&q={quote_plus(query)}"
+        links.append(f'<a class="hero-chip linkish {active}" href="{href}">{label}</a>')
+    return "".join(links)
+
+
+def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str, query: str) -> str:
+    return f"""
+    <form class="manual-form" method="get" action="/statistics">
+      <input type="hidden" name="range" value="{escape(range_name)}">
+      <input type="date" name="start" value="{escape(start_value)}">
+      <input type="date" name="end" value="{escape(end_value)}">
+      <input type="text" name="q" value="{escape(query)}" placeholder="Filter by symbol, e.g. BTC">
+      <button type="submit">Apply range</button>
+    </form>
+    """
+
+
+def _statistics_overview(snapshot) -> str:
+    return f"""
+    <div class="kv-grid">
+      <div class="kv"><span>Resolved</span>{snapshot.success + snapshot.failed}</div>
+      <div class="kv"><span>Pending</span>{snapshot.pending}</div>
+      <div class="kv"><span>Actionable</span>{snapshot.actionable}</div>
+      <div class="kv"><span>Watchlist</span>{snapshot.watchlist}</div>
+      <div class="kv"><span>Winrate</span>{snapshot.win_rate:.1f}%</div>
+      <div class="kv"><span>Avg confidence</span>{snapshot.avg_confidence:.1f}</div>
+    </div>
+    """
+
+
+def _statistics_table(rows: list) -> str:
+    if not rows:
+        return _empty_block("No setups matched the selected period and symbol filter.")
+    rendered_rows = []
+    for item in rows:
+        rendered_rows.append(
+            f"""
+            <tr>
+              <td><strong>{escape(item.symbol)}</strong></td>
+              <td>{item.total}</td>
+              <td>{item.success}</td>
+              <td>{item.failed}</td>
+              <td>{item.pending}</td>
+              <td>{item.actionable}</td>
+              <td>{item.watchlist}</td>
+              <td>{item.win_rate:.1f}%</td>
+              <td>{item.avg_confidence:.1f}</td>
+            </tr>
+            """
+        )
+    return f"""
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Total</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Pending</th>
+            <th>Actionable</th>
+            <th>Watchlist</th>
+            <th>Winrate</th>
+            <th>Avg confidence</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(rendered_rows)}</tbody>
+      </table>
     </div>
     """
 
