@@ -13,8 +13,15 @@ OKX_INTERVALS = {
     Timeframe.H4: "4H",
 }
 
+OKX_SYMBOL_ALIASES = {
+    "MATICUSDT": "POL-USDT-SWAP",
+}
+
 
 def to_okx_symbol(symbol: str) -> str:
+    alias = OKX_SYMBOL_ALIASES.get(symbol.upper())
+    if alias:
+        return alias
     base = symbol[:-4]
     return f"{base}-USDT-SWAP"
 
@@ -33,8 +40,9 @@ class OkxAdapter(ExchangeAdapter):
         return self.parse_candles_payload(symbol, timeframe, response.json())
 
     def parse_candles_payload(self, symbol: str, timeframe: Timeframe, payload: dict) -> list[MarketCandle]:
+        rows = self._require_data(payload, symbol)
         candles: list[MarketCandle] = []
-        for row in reversed(payload["data"]):
+        for row in reversed(rows):
             volume = float(row[5])
             quote_volume = float(row[6]) if len(row) > 6 else 0.0
             candles.append(
@@ -64,7 +72,7 @@ class OkxAdapter(ExchangeAdapter):
         return self.parse_book_payload(symbol, response.json())
 
     def parse_book_payload(self, symbol: str, payload: dict) -> BookSnapshot:
-        result = payload["data"][0]
+        result = self._require_data(payload, symbol)[0]
         return BookSnapshot(
             symbol=symbol,
             venue=self.venue,
@@ -81,6 +89,7 @@ class OkxAdapter(ExchangeAdapter):
         return self.parse_trades_payload(symbol, response.json())
 
     def parse_trades_payload(self, symbol: str, payload: dict) -> list[TradeTick]:
+        rows = self._require_data(payload, symbol)
         return [
             TradeTick(
                 symbol=symbol,
@@ -90,7 +99,7 @@ class OkxAdapter(ExchangeAdapter):
                 size=float(item["sz"]),
                 side=item["side"].lower(),
             )
-            for item in payload["data"]
+            for item in rows
         ]
 
     async def fetch_derivative_context(self, symbol: str) -> DerivativeContext:
@@ -101,9 +110,9 @@ class OkxAdapter(ExchangeAdapter):
         funding_response.raise_for_status()
         oi_response.raise_for_status()
         mark_response.raise_for_status()
-        funding = funding_response.json()["data"][0]
-        oi = oi_response.json()["data"][0]
-        mark_data = mark_response.json()["data"][0]
+        funding = self._require_data(funding_response.json(), symbol)[0]
+        oi = self._require_data(oi_response.json(), symbol)[0]
+        mark_data = self._require_data(mark_response.json(), symbol)[0]
         mark = float(mark_data["markPx"])
         index = float(mark_data.get("idxPx") or mark)
         return DerivativeContext(
@@ -116,3 +125,12 @@ class OkxAdapter(ExchangeAdapter):
             index_price=index,
             basis_bps=((mark - index) / index) * 10000 if index else 0.0,
         )
+
+    def _require_data(self, payload: dict, symbol: str) -> list[dict] | list[list]:
+        code = str(payload.get("code", "0"))
+        if code not in {"0", ""}:
+            raise ValueError(f"OKX API error {code}: {payload.get('msg', 'unknown error')}")
+        data = payload.get("data")
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"OKX API payload is empty for {symbol}")
+        return data

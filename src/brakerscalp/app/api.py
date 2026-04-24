@@ -5,18 +5,21 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 
-from brakerscalp.app.common import build_runtime
+from brakerscalp.app.common import build_exchange_adapters, build_runtime
 from brakerscalp.services.api_service import build_api
 
 
 async def create_app():
-    settings, repository, cache, _ = await build_runtime()
+    settings, repository, cache, universe = await build_runtime()
+    adapters = build_exchange_adapters(settings)
     @asynccontextmanager
     async def lifespan(_app):
         yield
         await cache.close()
+        for adapter in adapters.values():
+            await adapter.aclose()
 
-    app = build_api(repository, settings)
+    app = build_api(repository, cache, settings, universe, adapters)
     app.router.lifespan_context = lifespan
     return settings, app
 

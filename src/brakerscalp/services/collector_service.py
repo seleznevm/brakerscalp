@@ -48,6 +48,14 @@ class CollectorService:
                 await self._collect_universe_symbol(item)
 
         await asyncio.gather(*[_collect(item) for item in self.universe])
+        if hasattr(self.cache, "store_service_heartbeat"):
+            await self.cache.store_service_heartbeat(
+                "collector",
+                {
+                    "symbols": len(self.universe),
+                    "concurrency": self.symbol_concurrency,
+                },
+            )
 
     async def _collect_universe_symbol(self, item: UniverseSymbol) -> None:
         primary_adapter = self.adapters.get(item.primary_venue)

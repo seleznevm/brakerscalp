@@ -53,15 +53,30 @@ class EngineService:
     async def run_once(self) -> None:
         stale_count = 0
         total = 0
+        detected = 0
         for item in self.universe:
             total += 1
-            if await self._process_symbol(item):
+            stale, has_signal = await self._process_symbol(item)
+            if stale:
                 stale_count += 1
+            if has_signal:
+                detected += 1
         ratio = (stale_count / total) if total else 0
         STALE_DATA_RATIO.set(ratio)
-        SIGNALS_IN_DB.set(await self.repository.signal_count())
+        signal_count = await self.repository.signal_count()
+        SIGNALS_IN_DB.set(signal_count)
+        if hasattr(self.cache, "store_service_heartbeat"):
+            await self.cache.store_service_heartbeat(
+                "engine",
+                {
+                    "symbols": total,
+                    "stale_symbols": stale_count,
+                    "detected_signals": detected,
+                    "signals_in_db": signal_count,
+                },
+            )
 
-    async def _process_symbol(self, symbol_config: UniverseSymbol) -> int:
+    async def _process_symbol(self, symbol_config: UniverseSymbol) -> tuple[int, bool]:
         primary_venue = symbol_config.primary_venue.value
         symbol = symbol_config.symbol
         candles_4h = self._closed_candles(parse_model_list(await self.cache.get_candles(primary_venue, symbol, "4h"), MarketCandle))
@@ -72,7 +87,7 @@ class EngineService:
         book_payload = await self.cache.get_book(primary_venue, symbol)
         derivatives_payload = await self.cache.get_derivative_context(primary_venue, symbol)
         if not candles_4h or not candles_1h or not candles_15m or not health_payload:
-            return 1
+            return 1, False
 
         health = DataHealth.model_validate(health_payload)
         stale = 0 if health.is_fresh else 1
@@ -101,7 +116,7 @@ class EngineService:
             )
         )
         if decision is None:
-            return stale
+            return stale, False
 
         duplicate = await self.repository.find_recent_signal_match(
             symbol=decision.symbol,
@@ -120,7 +135,7 @@ class EngineService:
                 level_id=decision.level_id,
                 previous_detected_at=duplicate.detected_at.isoformat(),
             )
-            return stale
+            return stale, False
 
         await self.repository.save_signal(decision)
         ALERTS_TOTAL.labels(signal_class=decision.signal_class.value, setup=decision.setup.value).inc()
@@ -133,7 +148,7 @@ class EngineService:
                 await self.repository.ensure_delivery(alert)
                 await self.cache.enqueue_alert(alert)
         self.logger.info("signal-evaluated", symbol=symbol, signal_class=decision.signal_class.value, confidence=decision.confidence)
-        return stale
+        return stale, True
 
     def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
         now = datetime.now(tz=timezone.utc)

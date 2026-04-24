@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from redis.asyncio import Redis
@@ -21,6 +22,9 @@ class StateCache:
 
     def _key(self, *parts: str) -> str:
         return ":".join(["brakerscalp", *parts])
+
+    async def ping(self) -> bool:
+        return bool(await self.redis.ping())
 
     async def set_json(self, key: str, value: Any, ex: int | None = None) -> None:
         await self.redis.set(key, dumps(value), ex=ex)
@@ -74,6 +78,9 @@ class StateCache:
         _, payload = item
         return AlertMessage.model_validate(loads(payload))
 
+    async def outbox_size(self) -> int:
+        return int(await self.redis.llen(self._key("outbox")))
+
     async def set_chat_muted(self, chat_id: int, muted: bool) -> None:
         key = self._key("chat-muted", str(chat_id))
         if muted:
@@ -83,3 +90,14 @@ class StateCache:
 
     async def is_chat_muted(self, chat_id: int) -> bool:
         return bool(await self.redis.exists(self._key("chat-muted", str(chat_id))))
+
+    async def store_service_heartbeat(self, service: str, payload: dict[str, Any], ttl_seconds: int = 180) -> None:
+        data = {
+            **payload,
+            "service": service,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        await self.set_json(self._key("heartbeat", service), data, ex=ttl_seconds)
+
+    async def get_service_heartbeat(self, service: str) -> dict[str, Any] | None:
+        return await self.get_json(self._key("heartbeat", service))

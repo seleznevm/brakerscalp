@@ -13,6 +13,14 @@ BYBIT_INTERVALS = {
     Timeframe.H4: "240",
 }
 
+BYBIT_SYMBOL_ALIASES = {
+    "PEPEUSDT": "1000PEPEUSDT",
+}
+
+
+def to_bybit_symbol(symbol: str) -> str:
+    return BYBIT_SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
+
 
 class BybitAdapter(ExchangeAdapter):
     venue = Venue.BYBIT
@@ -21,14 +29,18 @@ class BybitAdapter(ExchangeAdapter):
     async def fetch_recent_candles(self, symbol: str, timeframe: Timeframe, limit: int = 300) -> list[MarketCandle]:
         response = await self.client.get(
             "/v5/market/kline",
-            params={"category": "linear", "symbol": symbol, "interval": BYBIT_INTERVALS[timeframe], "limit": limit},
+            params={"category": "linear", "symbol": to_bybit_symbol(symbol), "interval": BYBIT_INTERVALS[timeframe], "limit": limit},
         )
         response.raise_for_status()
         return self.parse_candles_payload(symbol, timeframe, response.json())
 
     def parse_candles_payload(self, symbol: str, timeframe: Timeframe, payload: dict) -> list[MarketCandle]:
+        result = self._require_result(payload)
+        rows = result.get("list")
+        if not isinstance(rows, list):
+            raise ValueError(f"Bybit kline payload is missing result.list for {symbol}")
         candles: list[MarketCandle] = []
-        for row in reversed(payload["result"]["list"]):
+        for row in reversed(rows):
             volume = float(row[5])
             quote_volume = float(row[6])
             candles.append(
@@ -54,13 +66,13 @@ class BybitAdapter(ExchangeAdapter):
     async def fetch_top_book(self, symbol: str, depth: int = 10) -> BookSnapshot:
         response = await self.client.get(
             "/v5/market/orderbook",
-            params={"category": "linear", "symbol": symbol, "limit": depth},
+            params={"category": "linear", "symbol": to_bybit_symbol(symbol), "limit": depth},
         )
         response.raise_for_status()
         return self.parse_book_payload(symbol, response.json())
 
     def parse_book_payload(self, symbol: str, payload: dict) -> BookSnapshot:
-        result = payload["result"]
+        result = self._require_result(payload)
         return BookSnapshot(
             symbol=symbol,
             venue=self.venue,
@@ -73,12 +85,16 @@ class BybitAdapter(ExchangeAdapter):
     async def fetch_trades(self, symbol: str, limit: int = 50) -> list[TradeTick]:
         response = await self.client.get(
             "/v5/market/recent-trade",
-            params={"category": "linear", "symbol": symbol, "limit": limit},
+            params={"category": "linear", "symbol": to_bybit_symbol(symbol), "limit": limit},
         )
         response.raise_for_status()
         return self.parse_trades_payload(symbol, response.json())
 
     def parse_trades_payload(self, symbol: str, payload: dict) -> list[TradeTick]:
+        result = self._require_result(payload)
+        rows = result.get("list")
+        if not isinstance(rows, list):
+            raise ValueError(f"Bybit trades payload is missing result.list for {symbol}")
         return [
             TradeTick(
                 symbol=symbol,
@@ -88,16 +104,20 @@ class BybitAdapter(ExchangeAdapter):
                 size=float(item["size"]),
                 side=item["side"].lower(),
             )
-            for item in payload["result"]["list"]
+            for item in rows
         ]
 
     async def fetch_derivative_context(self, symbol: str) -> DerivativeContext:
         response = await self.client.get(
             "/v5/market/tickers",
-            params={"category": "linear", "symbol": symbol},
+            params={"category": "linear", "symbol": to_bybit_symbol(symbol)},
         )
         response.raise_for_status()
-        result = response.json()["result"]["list"][0]
+        result_payload = self._require_result(response.json())
+        rows = result_payload.get("list")
+        if not rows:
+            raise ValueError(f"Bybit tickers payload is empty for {symbol}")
+        result = rows[0]
         mark = float(result["markPrice"])
         index = float(result["indexPrice"])
         return DerivativeContext(
@@ -110,3 +130,12 @@ class BybitAdapter(ExchangeAdapter):
             index_price=index,
             basis_bps=((mark - index) / index) * 10000 if index else 0.0,
         )
+
+    def _require_result(self, payload: dict) -> dict:
+        ret_code = int(payload.get("retCode", 0))
+        if ret_code != 0:
+            raise ValueError(f"Bybit API error {ret_code}: {payload.get('retMsg', 'unknown error')}")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("Bybit API payload is missing result object")
+        return result

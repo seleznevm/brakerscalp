@@ -43,6 +43,7 @@ class BotService:
         self.local_tz = self._load_timezone(settings.timezone)
         self._consume_task: asyncio.Task | None = None
         self._daily_summary_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -371,17 +372,31 @@ class BotService:
         await self._recover_pending_deliveries()
         self._consume_task = asyncio.create_task(self._consume_outbox())
         self._daily_summary_task = asyncio.create_task(self._daily_summary_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         await self._notify_lifecycle("startup")
         await self.dispatcher.start_polling(self.bot, polling_timeout=self.settings.bot_polling_timeout_seconds)
 
     async def shutdown(self) -> None:
-        for task in [self._consume_task, self._daily_summary_task]:
+        for task in [self._consume_task, self._daily_summary_task, self._heartbeat_task]:
             if task:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
         await self._notify_lifecycle("shutdown")
         await self.bot.session.close()
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            if hasattr(self.cache, "store_service_heartbeat"):
+                await self.cache.store_service_heartbeat(
+                    "bot",
+                    {
+                        "allowed_chats": len(self.allowed_chat_ids),
+                        "alert_chats": len(self.alert_chat_ids),
+                    },
+                    ttl_seconds=180,
+                )
+            await asyncio.sleep(30)
 
     def _format_delivery_counts(self, counts: dict[str, int]) -> str:
         if not counts:

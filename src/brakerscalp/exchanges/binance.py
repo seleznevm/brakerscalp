@@ -13,6 +13,14 @@ BINANCE_INTERVALS = {
     Timeframe.H4: "4h",
 }
 
+BINANCE_SYMBOL_ALIASES = {
+    "PEPEUSDT": "1000PEPEUSDT",
+}
+
+
+def to_binance_symbol(symbol: str) -> str:
+    return BINANCE_SYMBOL_ALIASES.get(symbol.upper(), symbol.upper())
+
 
 class BinanceAdapter(ExchangeAdapter):
     venue = Venue.BINANCE
@@ -21,7 +29,7 @@ class BinanceAdapter(ExchangeAdapter):
     async def fetch_recent_candles(self, symbol: str, timeframe: Timeframe, limit: int = 300) -> list[MarketCandle]:
         response = await self.client.get(
             "/fapi/v1/klines",
-            params={"symbol": symbol, "interval": BINANCE_INTERVALS[timeframe], "limit": limit},
+            params={"symbol": to_binance_symbol(symbol), "interval": BINANCE_INTERVALS[timeframe], "limit": limit},
         )
         response.raise_for_status()
         return self.parse_candles_payload(symbol, timeframe, response.json())
@@ -52,7 +60,7 @@ class BinanceAdapter(ExchangeAdapter):
         return candles
 
     async def fetch_top_book(self, symbol: str, depth: int = 10) -> BookSnapshot:
-        response = await self.client.get("/fapi/v1/depth", params={"symbol": symbol, "limit": depth})
+        response = await self.client.get("/fapi/v1/depth", params={"symbol": to_binance_symbol(symbol), "limit": depth})
         response.raise_for_status()
         return self.parse_book_payload(symbol, response.json())
 
@@ -67,7 +75,7 @@ class BinanceAdapter(ExchangeAdapter):
         )
 
     async def fetch_trades(self, symbol: str, limit: int = 50) -> list[TradeTick]:
-        response = await self.client.get("/fapi/v1/trades", params={"symbol": symbol, "limit": limit})
+        response = await self.client.get("/fapi/v1/trades", params={"symbol": to_binance_symbol(symbol), "limit": limit})
         response.raise_for_status()
         return self.parse_trades_payload(symbol, response.json())
 
@@ -85,8 +93,9 @@ class BinanceAdapter(ExchangeAdapter):
         ]
 
     async def fetch_derivative_context(self, symbol: str) -> DerivativeContext:
-        premium_response = await self.client.get("/fapi/v1/premiumIndex", params={"symbol": symbol})
-        oi_response = await self.client.get("/fapi/v1/openInterest", params={"symbol": symbol})
+        exchange_symbol = to_binance_symbol(symbol)
+        premium_response = await self.client.get("/fapi/v1/premiumIndex", params={"symbol": exchange_symbol})
+        oi_response = await self.client.get("/fapi/v1/openInterest", params={"symbol": exchange_symbol})
         premium_response.raise_for_status()
         oi_response.raise_for_status()
         premium = premium_response.json()
