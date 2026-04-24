@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from html import escape
+from io import BytesIO
 from typing import Any
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import pandas as pd
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -83,7 +85,7 @@ def build_api(
                 _metric_card("Actionable 24ч", str(actionable_24h), "Пробои, которые дошли до actionable."),
                 _metric_card("Watchlist 24ч", str(watchlist_24h), "Слабее actionable, но уже рядом с уровнем."),
                 _metric_card("Outbox", str(await cache.outbox_size()), _format_delivery_counts(delivery_counts)),
-                _metric_card("Min confidence", f"{minimum_alert_confidence:.1f}", "ÐœÐ¸Ð½Ð¸Ð¼Ð°Ð»ÑŒÐ½Ñ‹Ð¹ confidence Ð´Ð»Ñ Ð¾Ñ‚Ð¿Ñ€Ð°Ð²ÐºÐ¸ Ð² Telegram."),
+                _metric_card("Min confidence", f"{minimum_alert_confidence:.1f}", "Minimum confidence required before a setup is sent to Telegram."),
             ]
         )
         opportunities = _opportunities_table(screener[:10], local_tz)
@@ -254,46 +256,71 @@ def build_api(
     ) -> HTMLResponse:
         start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
         snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
+        export_href = _statistics_export_href(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q)
         body = f"""
         <section class="hero compact">
           <div>
             <p class="eyebrow">Performance / Statistics</p>
-            <h1>Ð¡Ñ‚Ð°Ñ‚Ð¸ÑÑ‚Ð¸ÐºÐ° ÑÐµÑ‚Ð°Ð¿Ð¾Ð²</h1>
-            <p class="hero-copy">Ð¡Ð²Ð¾Ð´ÐºÐ° Ð¿Ð¾ Ð²Ñ‹Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ð¼, Ð¿Ñ€Ð¾Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ð¼ Ð¸ pending ÑÐµÑ‚Ð°Ð¿Ð°Ð¼ Ñ Ñ€Ð°Ð·Ð±Ð¸Ð²ÐºÐ¾Ð¹ Ð¿Ð¾ Ð¼Ð¾Ð½ÐµÑ‚Ð°Ð¼ Ð¸ Ð¿ÐµÑ€Ð¸Ð¾Ð´Ð°Ð¼.</p>
+            <h1>Setup Statistics</h1>
+            <p class="hero-copy">Performance summary for wins, losses, and pending setups with breakdowns by symbol and time range.</p>
           </div>
           <div class="hero-meta">
             {_statistics_range_links(selected=range, query=q)}
           </div>
         </section>
         <section class="panel">
-          {_statistics_filter_form(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q)}
+          {_statistics_filter_form(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q, export_href=export_href)}
         </section>
         <section class="metrics-grid">
-          {_metric_card("Ð’ÑÐµÐ³Ð¾", str(snapshot.total), f"ÐŸÐµÑ€Ð¸Ð¾Ð´: {start_local.isoformat()} - {(end_local - timedelta(days=1)).isoformat()}")}
-          {_metric_card("Ð’Ñ‹Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ñ…", str(snapshot.success), "Ð¡ÐµÑ‚Ð°Ð¿Ñ‹, Ð³Ð´Ðµ Ñ†ÐµÐ½Ð° ÑÐ½Ð°Ñ‡Ð°Ð»Ð° Ð´Ð¾ÑˆÐ»Ð° Ð´Ð¾ T1.")}
-          {_metric_card("ÐŸÑ€Ð¾Ð¸Ð³Ñ€Ñ‹ÑˆÐ½Ñ‹Ñ…", str(snapshot.failed), "Ð¡ÐµÑ‚Ð°Ð¿Ñ‹, Ð³Ð´Ðµ Ð¿ÐµÑ€Ð²Ð¾Ð¹ ÑÑ€Ð°Ð±Ð¾Ñ‚Ð°Ð»Ð° Ð¸Ð½Ð²Ð°Ð»Ð¸Ð´Ð°Ñ†Ð¸Ñ.")}
-          {_metric_card("Winrate", f"{snapshot.win_rate:.1f}%", "Ð¡Ñ‡Ð¸Ñ‚Ð°ÐµÑ‚ÑÑ Ñ‚Ð¾Ð»ÑŒÐºÐ¾ Ð¿Ð¾ resolved ÑÐµÑ‚Ð°Ð¿Ð°Ð¼.")}
-          {_metric_card("Pending", str(snapshot.pending), "Ð¡Ð¸Ð³Ð½Ð°Ð»Ñ‹, ÐºÐ¾Ñ‚Ð¾Ñ€Ñ‹Ðµ ÐµÑ‰Ðµ Ð² Ñ€Ð°Ð±Ð¾Ñ‚Ðµ.")}
-          {_metric_card("Avg confidence", f"{snapshot.avg_confidence:.1f}", "Ð¡Ñ€ÐµÐ´Ð½Ð¸Ð¹ confidence Ð¿Ð¾ Ð²Ñ‹Ð±Ñ€Ð°Ð½Ð½Ð¾Ð¼Ñƒ Ð¿ÐµÑ€Ð¸Ð¾Ð´Ñƒ.")}
+          {_metric_card("Total", str(snapshot.total), f"Range: {start_local.isoformat()} to {(end_local - timedelta(days=1)).isoformat()}")}
+          {_metric_card("Wins", str(snapshot.success), "Setups where price reached TP1 before invalidation.")}
+          {_metric_card("Losses", str(snapshot.failed), "Setups where invalidation was hit first.")}
+          {_metric_card("Win rate", f"{snapshot.win_rate:.1f}%", "Calculated on resolved setups only.")}
+          {_metric_card("Pending", str(snapshot.pending), "Setups that are still active or unresolved.")}
+          {_metric_card("Avg confidence", f"{snapshot.avg_confidence:.1f}", "Average confidence over the selected range.")}
         </section>
         <section class="two-col">
           <div class="panel">
             <div class="panel-head">
-              <h2>Ð¡Ð²Ð¾Ð´ÐºÐ° Ð´Ð¸Ð°Ð¿Ð°Ð·Ð¾Ð½Ð°</h2>
+              <h2>Range Summary</h2>
               <span class="muted">Actionable: {snapshot.actionable} · Watchlist: {snapshot.watchlist}</span>
             </div>
             {_statistics_overview(snapshot)}
           </div>
           <div class="panel">
             <div class="panel-head">
-              <h2>ÐŸÐ¾ Ð¼Ð¾Ð½ÐµÑ‚Ð°Ð¼</h2>
-              <span class="muted">Ð¤Ð¸Ð»ÑŒÑ‚Ñ€: {escape(q or 'Ð½Ðµ Ð·Ð°Ð´Ð°Ð½')}</span>
+              <h2>By Symbol</h2>
+              <span class="muted">Filter: {escape(q or 'not set')}</span>
             </div>
             {_statistics_table(snapshot.rows)}
           </div>
         </section>
         """
-        return HTMLResponse(_page("Ð¡Ñ‚Ð°Ñ‚Ð¸ÑÑ‚Ð¸ÐºÐ°", "statistics", body, refresh_seconds=60))
+        return HTMLResponse(_page("Statistics", "statistics", body, refresh_seconds=60))
+
+    @app.get("/statistics/export.xlsx")
+    async def statistics_export(
+        range: str = Query(default="day", pattern="^(day|week|month|custom)$"),
+        start: str | None = None,
+        end: str | None = None,
+        q: str = Query(default=""),
+    ) -> Response:
+        start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
+        snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
+        workbook = _statistics_workbook(
+            snapshot=snapshot,
+            range_name=range,
+            start_local=start_local,
+            end_local=end_local,
+            symbol_query=q,
+        )
+        filename = f"brakerscalp-statistics-{range}-{start_local.isoformat()}-{(end_local - timedelta(days=1)).isoformat()}.xlsx"
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return Response(
+            content=workbook.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
 
     @app.get("/charts/signal/{decision_id}.png")
     async def signal_chart(decision_id: str) -> Response:
@@ -936,6 +963,26 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       font-weight: 700;
       cursor: pointer;
     }}
+    .button-link {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 50px;
+      padding: 14px 18px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .manual-form select {{
+      color-scheme: dark;
+    }}
+    .manual-form select option {{
+      background: #0b1720;
+      color: #f5fbff;
+    }}
     .scan-card {{
       padding: 16px;
       border-radius: 18px;
@@ -1356,7 +1403,16 @@ def _statistics_range_links(*, selected: str, query: str) -> str:
     return "".join(links)
 
 
-def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str, query: str) -> str:
+def _statistics_export_href(*, range_name: str, start_value: str, end_value: str, query: str) -> str:
+    return (
+        f"/statistics/export.xlsx?range={quote_plus(range_name)}"
+        f"&start={quote_plus(start_value)}"
+        f"&end={quote_plus(end_value)}"
+        f"&q={quote_plus(query)}"
+    )
+
+
+def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str, query: str, export_href: str) -> str:
     return f"""
     <form class="manual-form" method="get" action="/statistics">
       <input type="hidden" name="range" value="{escape(range_name)}">
@@ -1364,6 +1420,7 @@ def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str
       <input type="date" name="end" value="{escape(end_value)}">
       <input type="text" name="q" value="{escape(query)}" placeholder="Filter by symbol, e.g. BTC">
       <button type="submit">Apply range</button>
+      <a class="button-link" href="{escape(export_href)}">Export Excel</a>
     </form>
     """
 
@@ -1421,6 +1478,48 @@ def _statistics_table(rows: list) -> str:
       </table>
     </div>
     """
+
+
+def _statistics_workbook(*, snapshot, range_name: str, start_local: date, end_local: date, symbol_query: str) -> BytesIO:
+    summary_df = pd.DataFrame(
+        [
+            {"Metric": "Range", "Value": range_name},
+            {"Metric": "Start date", "Value": start_local.isoformat()},
+            {"Metric": "End date", "Value": (end_local - timedelta(days=1)).isoformat()},
+            {"Metric": "Symbol filter", "Value": symbol_query or ""},
+            {"Metric": "Total", "Value": snapshot.total},
+            {"Metric": "Wins", "Value": snapshot.success},
+            {"Metric": "Losses", "Value": snapshot.failed},
+            {"Metric": "Pending", "Value": snapshot.pending},
+            {"Metric": "Resolved", "Value": snapshot.success + snapshot.failed},
+            {"Metric": "Actionable", "Value": snapshot.actionable},
+            {"Metric": "Watchlist", "Value": snapshot.watchlist},
+            {"Metric": "Win rate %", "Value": round(snapshot.win_rate, 2)},
+            {"Metric": "Avg confidence", "Value": round(snapshot.avg_confidence, 2)},
+        ]
+    )
+    rows_df = pd.DataFrame(
+        [
+            {
+                "Symbol": item.symbol,
+                "Total": item.total,
+                "Wins": item.success,
+                "Losses": item.failed,
+                "Pending": item.pending,
+                "Actionable": item.actionable,
+                "Watchlist": item.watchlist,
+                "Win rate %": round(item.win_rate, 2),
+                "Avg confidence": round(item.avg_confidence, 2),
+            }
+            for item in snapshot.rows
+        ]
+    )
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="summary", index=False)
+        rows_df.to_excel(writer, sheet_name="by_symbol", index=False)
+    buffer.seek(0)
+    return buffer
 
 
 def _empty_block(text: str) -> str:

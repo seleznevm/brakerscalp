@@ -46,10 +46,16 @@ async def test_statistics_page_and_threshold_route_render(repository, cache) -> 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
         statistics = await client.get("/statistics")
+        export = await client.get("/statistics/export.xlsx")
         apply_threshold = await client.get("/settings/apply-threshold?value=74.5")
 
     assert statistics.status_code == 200
+    assert "Setup Statistics" in statistics.text
     assert "/statistics?range=week" in statistics.text
+    assert "Export Excel" in statistics.text
+    assert export.status_code == 200
+    assert export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment; filename=" in export.headers["content-disposition"]
     assert apply_threshold.status_code == 303
     assert apply_threshold.headers["location"] == "/settings?threshold_saved=1"
     assert await cache.get_minimum_alert_confidence(65.0) == 74.5
