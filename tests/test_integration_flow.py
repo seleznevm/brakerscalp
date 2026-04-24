@@ -4,16 +4,9 @@ from brakerscalp.domain.models import Timeframe, UniverseSymbol, Venue
 from brakerscalp.services.engine_service import EngineService
 
 
-async def test_engine_generates_alert(repository, cache, make_candles, make_book, make_health, make_derivatives) -> None:
+async def test_engine_generates_alert(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
-    candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
-    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
-    anchor_price = candles_1h[-1].close - 80
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
-    candles_15m[-1].close += 500
-    candles_15m[-1].high = candles_15m[-1].close + 20
-    candles_15m[-1].volume *= 8
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
 
     await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
     await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)
@@ -34,18 +27,11 @@ async def test_engine_generates_alert(repository, cache, make_candles, make_book
     assert queued.chat_id == 123
 
 
-async def test_engine_filters_unclosed_candle(repository, cache, make_candles, make_book, make_health, make_derivatives) -> None:
+async def test_engine_filters_unclosed_candle(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
     from datetime import datetime, timedelta, timezone
 
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
-    candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
-    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
-    anchor_price = candles_1h[-1].close - 80
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
-    candles_15m[-1].close += 500
-    candles_15m[-1].high = candles_15m[-1].close + 20
-    candles_15m[-1].volume *= 8
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
     candles_15m[-1].close_time = datetime.now(tz=timezone.utc) + timedelta(minutes=10)
 
     await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
@@ -64,16 +50,9 @@ async def test_engine_filters_unclosed_candle(repository, cache, make_candles, m
     assert all(item.close_time <= datetime.now(tz=timezone.utc) for item in closed)
 
 
-async def test_engine_suppresses_duplicate_setup(repository, cache, make_candles, make_book, make_health, make_derivatives) -> None:
+async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
-    candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=50)
-    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=15)
-    anchor_price = candles_1h[-1].close - 80
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=0, start_price=anchor_price)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=0, start_price=anchor_price)
-    candles_15m[-1].close += 500
-    candles_15m[-1].high = candles_15m[-1].close + 20
-    candles_15m[-1].volume *= 8
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
 
     await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
     await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)

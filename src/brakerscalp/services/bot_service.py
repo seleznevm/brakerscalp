@@ -10,13 +10,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import BotCommand, Message
+from aiogram.types import BotCommand, BufferedInputFile, Message
 
 from brakerscalp.config import Settings
 from brakerscalp.domain.models import AlertMessage, SignalClass
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import ALERT_LATENCY_SECONDS
 from brakerscalp.services.daily_summary import SignalOutcome, classify_signal_outcome, render_daily_summary
+from brakerscalp.signals.charting import render_signal_chart
+from brakerscalp.signals.rendering import render_chart_caption
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.repository import Repository
 
@@ -253,7 +255,7 @@ class BotService:
                 if await self.cache.is_chat_muted(alert.chat_id):
                     await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "muted")
                     continue
-                await self._send_with_thread_fallback(alert.chat_id, alert.text, alert.message_thread_id)
+                await self._send_alert_bundle(alert)
                 await self.repository.mark_delivery(alert.signal_id, alert.chat_id, "sent")
                 ALERT_LATENCY_SECONDS.observe(0.0)
             except asyncio.CancelledError:
@@ -408,6 +410,74 @@ class BotService:
         except ZoneInfoNotFoundError:
             self.logger.warning("bot-invalid-timezone-fallback", timezone=timezone_name)
             return ZoneInfo("UTC")
+
+    async def _send_alert_bundle(self, alert: AlertMessage) -> None:
+        chart_bytes, chart_caption = await self._build_alert_chart(alert.signal_id)
+        try:
+            await self._deliver_alert_bundle(
+                chat_id=alert.chat_id,
+                text=alert.text,
+                message_thread_id=alert.message_thread_id,
+                chart_bytes=chart_bytes,
+                chart_caption=chart_caption,
+            )
+        except TelegramBadRequest as exc:
+            error_text = str(exc).lower()
+            if alert.message_thread_id and ("message thread not found" in error_text or "chat not found" in error_text):
+                self.logger.warning(
+                    "bot-thread-fallback",
+                    chat_id=alert.chat_id,
+                    message_thread_id=alert.message_thread_id,
+                    error=str(exc),
+                )
+                await self._deliver_alert_bundle(
+                    chat_id=alert.chat_id,
+                    text=alert.text,
+                    message_thread_id=None,
+                    chart_bytes=chart_bytes,
+                    chart_caption=chart_caption,
+                )
+                return
+            raise
+
+    async def _deliver_alert_bundle(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        message_thread_id: int | None,
+        chart_bytes: bytes | None,
+        chart_caption: str | None,
+    ) -> None:
+        if chart_bytes is not None and chart_caption is not None:
+            chart_file = BufferedInputFile(chart_bytes, filename="signal-chart.png")
+            await self.bot.send_photo(
+                chat_id,
+                photo=chart_file,
+                caption=chart_caption,
+                message_thread_id=message_thread_id,
+            )
+        await self.bot.send_message(
+            chat_id,
+            text,
+            message_thread_id=message_thread_id,
+        )
+
+    async def _build_alert_chart(self, signal_id: str) -> tuple[bytes | None, str | None]:
+        signal = await self.repository.get_signal_by_decision_id(signal_id)
+        if signal is None:
+            return None, None
+        candles = await self.repository.get_candles_before(
+            signal.venue,
+            signal.symbol,
+            signal.timeframe,
+            signal.detected_at,
+            limit=64,
+        )
+        chart_bytes = render_signal_chart(candles, signal)
+        if chart_bytes is None:
+            return None, None
+        return chart_bytes, render_chart_caption(signal)
 
     async def _send_with_thread_fallback(self, chat_id: int, text: str, message_thread_id: int | None) -> None:
         try:

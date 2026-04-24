@@ -5,15 +5,8 @@ from brakerscalp.signals.engine import EngineInput, RuleEngine
 from brakerscalp.signals.levels import LevelDetector
 
 
-def test_breakout_signal(make_candles, make_book, make_derivatives, make_health) -> None:
-    candles_4h = make_candles(timeframe=Timeframe.H4, count=30, step=50.0)
-    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=12.0)
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=8.0)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=6.0)
-    candles_15m[-1].close = candles_15m[-1].close + 500
-    candles_15m[-1].high = candles_15m[-1].close + 10
-    candles_15m[-1].volume = candles_15m[-1].volume * 5
-
+def test_breakout_signal(make_breakout_market, make_book, make_derivatives, make_health) -> None:
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
     detector = LevelDetector()
     levels = detector.detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
     engine = RuleEngine()
@@ -33,5 +26,5 @@ def test_breakout_signal(make_candles, make_book, make_derivatives, make_health)
         )
     )
     assert decision is not None
+    assert decision.setup.value == "breakout"
     assert decision.confidence >= 65
-

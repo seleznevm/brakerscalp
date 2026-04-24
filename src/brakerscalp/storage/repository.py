@@ -263,6 +263,12 @@ class Repository:
             result = await session.execute(select(SignalRecord).order_by(desc(SignalRecord.detected_at)).limit(limit))
             return list(result.scalars())
 
+    async def get_signal_by_decision_id(self, decision_id: str) -> SignalRecord | None:
+        async with self.session_factory() as session:
+            return await session.scalar(
+                select(SignalRecord).where(SignalRecord.decision_id == decision_id)
+            )
+
     async def list_signals_between(
         self,
         start_at: datetime,
@@ -326,6 +332,28 @@ class Repository:
                     CandleRecord.venue == venue,
                     CandleRecord.symbol == symbol,
                     CandleRecord.timeframe == timeframe,
+                )
+                .order_by(desc(CandleRecord.close_time))
+                .limit(limit)
+            )
+            return list(reversed(list(result.scalars())))
+
+    async def get_candles_before(
+        self,
+        venue: str,
+        symbol: str,
+        timeframe: str,
+        end_at: datetime,
+        limit: int = 80,
+    ) -> list[CandleRecord]:
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(CandleRecord)
+                .where(
+                    CandleRecord.venue == venue,
+                    CandleRecord.symbol == symbol,
+                    CandleRecord.timeframe == timeframe,
+                    CandleRecord.close_time <= end_at,
                 )
                 .order_by(desc(CandleRecord.close_time))
                 .limit(limit)

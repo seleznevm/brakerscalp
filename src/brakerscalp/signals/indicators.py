@@ -55,6 +55,13 @@ def median_spread(spreads: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2
 
 
+def simple_moving_average(values: list[float], period: int) -> float:
+    if not values:
+        return 0.0
+    window = values[-period:] if len(values) >= period else values
+    return sum(window) / len(window)
+
+
 def local_extrema(values: list[float], window: int = 2) -> tuple[list[int], list[int]]:
     highs: list[int] = []
     lows: list[int] = []
@@ -70,4 +77,3 @@ def local_extrema(values: list[float], window: int = 2) -> tuple[list[int], list
         if point <= min(left + right):
             lows.append(index)
     return highs, lows
-

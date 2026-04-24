@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from brakerscalp.domain.models import Timeframe, Venue
 from brakerscalp.signals.engine import EngineInput, RuleEngine
+from brakerscalp.signals.charting import render_signal_chart
 from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.signals.rendering import render_signal
 
 
-def test_render_signal_contains_required_sections(make_candles, make_book, make_derivatives, make_health) -> None:
-    candles_4h = make_candles(timeframe=Timeframe.H4, count=30, step=50.0)
-    candles_1h = make_candles(timeframe=Timeframe.H1, count=200, step=12.0)
-    candles_15m = make_candles(timeframe=Timeframe.M15, count=80, step=8.0)
-    candles_5m = make_candles(timeframe=Timeframe.M5, count=80, step=6.0)
-    candles_15m[-1].close += 500
-    candles_15m[-1].volume *= 5
+def test_render_signal_contains_required_sections(make_breakout_market, make_book, make_derivatives, make_health) -> None:
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
     levels = LevelDetector().detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
     decision = RuleEngine().evaluate(
         EngineInput(
@@ -37,3 +33,8 @@ def test_render_signal_contains_required_sections(make_candles, make_book, make_
     assert "Обоснование:" in text
     assert "Инвалидация:" in text
     assert "Почему уверенность не выше:" in text
+    assert "Entry:" in text
+
+    chart = render_signal_chart(candles_15m, decision)
+    assert chart is not None
+    assert chart.startswith(b"\x89PNG")

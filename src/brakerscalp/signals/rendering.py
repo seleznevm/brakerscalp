@@ -16,7 +16,8 @@ def _coin_hashtag(symbol: str) -> str:
 
 
 def _hashtags(decision: SignalDecision) -> str:
-    return f"#{decision.setup.value.upper()} #{_coin_hashtag(decision.symbol)}"
+    setup = decision.setup.value if hasattr(decision.setup, "value") else str(decision.setup)
+    return f"#{setup.upper()} #{_coin_hashtag(decision.symbol)}"
 
 
 def render_signal(decision: SignalDecision) -> str:
@@ -33,6 +34,11 @@ def render_signal(decision: SignalDecision) -> str:
         f"{context['price_zone']} | HTF источник: {context['htf_source']}\n\n"
         f"Триггер:\n"
         f"{context['trigger']}\n\n"
+        f"План сделки:\n"
+        f"- Entry: {decision.entry_price:.4f}\n"
+        f"- SL: {decision.invalidation_price:.4f}\n"
+        f"- T1: {targets[0]:.4f}\n"
+        f"- T2: {targets[1]:.4f}\n\n"
         f"Обоснование:\n"
         f"{rationale_lines}\n\n"
         f"Инвалидация:\n"
@@ -47,6 +53,16 @@ def render_signal(decision: SignalDecision) -> str:
         f"- Свежесть: {decision.data_health.freshness_ms} ms\n"
         f"- Использованные биржи: {context['venues_used']}\n"
         f"- Разрывы последовательности: {'восстановлены' if decision.data_health.has_sequence_gap else 'нет'}"
+    )
+
+
+def render_chart_caption(decision: SignalDecision) -> str:
+    setup = decision.setup.value if hasattr(decision.setup, "value") else str(decision.setup)
+    direction = decision.direction.value if hasattr(decision.direction, "value") else str(decision.direction)
+    return (
+        f"{decision.symbol} | {setup.upper()} | {direction.upper()}\n"
+        f"{_hashtags(decision)}\n"
+        f"Entry {decision.entry_price:.4f} | SL {decision.invalidation_price:.4f} | T1 {decision.targets[0]:.4f}"
     )
 
 

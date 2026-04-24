@@ -7,6 +7,7 @@ import fakeredis.aioredis
 import pytest
 
 from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, OrderBookLevel, Timeframe, Venue
+from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.db import create_engine, create_session_factory, init_db
 from brakerscalp.storage.repository import Repository
@@ -119,3 +120,66 @@ def make_derivatives() -> Callable[..., DerivativeContext]:
         )
 
     return _make_derivatives
+
+
+@pytest.fixture
+def make_breakout_market(make_candles):
+    def _make(symbol: str = "BTCUSDT", venue: Venue = Venue.BINANCE):
+        candles_4h = make_candles(venue=venue, symbol=symbol, timeframe=Timeframe.H4, count=40, step=50.0)
+        candles_1h = make_candles(venue=venue, symbol=symbol, timeframe=Timeframe.H1, count=200, step=15.0)
+        levels = LevelDetector().detect(symbol, venue, candles_4h, candles_1h)
+        resistance_levels = [item for item in levels if item.kind.value == "resistance"]
+        reference_level = max(resistance_levels, key=lambda item: item.reference_price)
+
+        consolidation_base = reference_level.upper_price - 25.0
+        candles_15m = make_candles(
+            venue=venue,
+            symbol=symbol,
+            timeframe=Timeframe.M15,
+            count=80,
+            step=0.0,
+            start_price=consolidation_base - 30.0,
+            volume=1200.0,
+        )
+        candles_5m = make_candles(
+            venue=venue,
+            symbol=symbol,
+            timeframe=Timeframe.M5,
+            count=80,
+            step=0.0,
+            start_price=consolidation_base - 20.0,
+            volume=900.0,
+        )
+
+        lows = [reference_level.upper_price - 85.0, reference_level.upper_price - 72.0, reference_level.upper_price - 60.0, reference_level.upper_price - 48.0, reference_level.upper_price - 38.0, reference_level.upper_price - 30.0, reference_level.upper_price - 22.0]
+        closes = [reference_level.upper_price - 42.0, reference_level.upper_price - 37.0, reference_level.upper_price - 33.0, reference_level.upper_price - 28.0, reference_level.upper_price - 24.0, reference_level.upper_price - 19.0, reference_level.upper_price - 14.0]
+        for candle, low, close in zip(candles_15m[-8:-1], lows, closes, strict=True):
+            candle.open = close - 4.0
+            candle.close = close
+            candle.low = low
+            candle.high = min(reference_level.upper_price - 4.0, close + 10.0)
+            candle.volume = 1500.0
+            candle.quote_volume = candle.volume * candle.close
+            candle.vwap = (candle.open + candle.close) / 2
+
+        breakout = candles_15m[-1]
+        breakout.open = reference_level.upper_price - 18.0
+        breakout.low = reference_level.upper_price - 22.0
+        breakout.close = reference_level.upper_price + 95.0
+        breakout.high = breakout.close + 8.0
+        breakout.volume = 12000.0
+        breakout.quote_volume = breakout.volume * breakout.close
+        breakout.vwap = (breakout.open + breakout.close) / 2
+
+        for index, candle in enumerate(candles_5m[-3:], start=1):
+            candle.open = reference_level.upper_price + 8.0 * (index - 1)
+            candle.low = reference_level.upper_price + 4.0 * (index - 1)
+            candle.close = reference_level.upper_price + 14.0 * index
+            candle.high = candle.close + 6.0
+            candle.volume = 2200.0 + index * 200.0
+            candle.quote_volume = candle.volume * candle.close
+            candle.vwap = (candle.open + candle.close) / 2
+
+        return candles_4h, candles_1h, candles_15m, candles_5m
+
+    return _make

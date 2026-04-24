@@ -66,6 +66,8 @@ class LevelDetector:
             ]
         )
 
+        levels.extend(self._cascade_levels(symbol, venue, candles_1h, zone_half_width))
+
         vwap = rolling_vwap(candles_1h[-48:], period=min(48, len(candles_1h[-48:])))
         levels.append(self._make_level(symbol, venue, Timeframe.H1, LevelKind.SUPPORT, "vwap-zone", vwap, zone_half_width, candles_1h[-1], 0.6))
         levels.append(self._make_level(symbol, venue, Timeframe.H1, LevelKind.RESISTANCE, "vwap-zone", vwap, zone_half_width, candles_1h[-1], 0.6))
@@ -114,3 +116,74 @@ class LevelDetector:
     ) -> str:
         payload = f"{venue.value}|{symbol}|{timeframe.value}|{kind.value}|{source}|{reference_price:.4f}"
         return sha1(payload.encode("utf-8")).hexdigest()[:24]
+
+    def _cascade_levels(
+        self,
+        symbol: str,
+        venue: Venue,
+        candles_1h: list[MarketCandle],
+        zone_half_width: float,
+    ) -> list[LevelCandidate]:
+        recent = candles_1h[-36:]
+        if len(recent) < 12:
+            return []
+
+        resistance_clusters = self._cluster_prices([item.high for item in recent], tolerance=zone_half_width * 1.1)
+        support_clusters = self._cluster_prices([item.low for item in recent], tolerance=zone_half_width * 1.1)
+        levels: list[LevelCandidate] = []
+
+        for cluster in resistance_clusters:
+            if len(cluster) < 2:
+                continue
+            reference_price = sum(cluster) / len(cluster)
+            strength = min(0.72 + len(cluster) * 0.06, 0.95)
+            level = self._make_level(
+                symbol=symbol,
+                venue=venue,
+                timeframe=Timeframe.H1,
+                kind=LevelKind.RESISTANCE,
+                source="cascade-high",
+                reference_price=reference_price,
+                zone_half_width=zone_half_width,
+                candle=recent[-1],
+                strength=strength,
+            )
+            level.touches = len(cluster)
+            levels.append(level)
+
+        for cluster in support_clusters:
+            if len(cluster) < 2:
+                continue
+            reference_price = sum(cluster) / len(cluster)
+            strength = min(0.72 + len(cluster) * 0.06, 0.95)
+            level = self._make_level(
+                symbol=symbol,
+                venue=venue,
+                timeframe=Timeframe.H1,
+                kind=LevelKind.SUPPORT,
+                source="cascade-low",
+                reference_price=reference_price,
+                zone_half_width=zone_half_width,
+                candle=recent[-1],
+                strength=strength,
+            )
+            level.touches = len(cluster)
+            levels.append(level)
+
+        return levels
+
+    def _cluster_prices(self, prices: list[float], tolerance: float) -> list[list[float]]:
+        if not prices:
+            return []
+        clusters: list[list[float]] = []
+        for price in sorted(prices):
+            matched = False
+            for cluster in clusters:
+                center = sum(cluster) / len(cluster)
+                if abs(price - center) <= tolerance:
+                    cluster.append(price)
+                    matched = True
+                    break
+            if not matched:
+                clusters.append([price])
+        return clusters
