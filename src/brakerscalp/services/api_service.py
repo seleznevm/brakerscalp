@@ -49,7 +49,7 @@ STATUS_TONES = {
 }
 
 OUTCOME_LABELS = {
-    "pending": "В работе",
+    "pending": "EXECUTED",
     "success": "TP1 достигнут",
     "failed": "Инвалидация",
 }
@@ -297,10 +297,20 @@ def build_api(
         start: str | None = None,
         end: str | None = None,
         q: str = Query(default=""),
+        sort_by: str = Query(default="total", pattern="^(symbol|total|wins|losses|winrate|avg_confidence)$"),
+        sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
         start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
         snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
-        export_href = _statistics_export_href(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q)
+        snapshot.rows = _sort_statistics_rows(snapshot.rows, sort_by=sort_by, sort_dir=sort_dir)
+        export_href = _statistics_export_href(
+            range_name=range,
+            start_value=start_local.isoformat(),
+            end_value=(end_local - timedelta(days=1)).isoformat(),
+            query=q,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+        )
         body = f"""
         <section class="hero compact">
           <div>
@@ -313,7 +323,7 @@ def build_api(
           </div>
         </section>
         <section class="panel">
-          {_statistics_filter_form(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q, export_href=export_href)}
+          {_statistics_filter_form(range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q, export_href=export_href, sort_by=sort_by, sort_dir=sort_dir)}
         </section>
         <section class="metrics-grid">
           {_metric_card("Total", str(snapshot.total), f"Range: {start_local.isoformat()} to {(end_local - timedelta(days=1)).isoformat()}")}
@@ -336,7 +346,7 @@ def build_api(
               <h2>By Symbol</h2>
               <span class="muted">Filter: {escape(q or 'not set')}</span>
             </div>
-            {_statistics_table(snapshot.rows)}
+            {_statistics_table(snapshot.rows, range_name=range, start_value=start_local.isoformat(), end_value=(end_local - timedelta(days=1)).isoformat(), query=q, sort_by=sort_by, sort_dir=sort_dir)}
           </div>
         </section>
         """
@@ -1343,7 +1353,7 @@ def _setups_filter_form(*, status: str, symbol_query: str, limit: int, min_confi
       <input type="hidden" name="limit" value="{limit}">
       <select name="status" class="filter-select">
         <option value="all" {selected["all"]}>All statuses</option>
-        <option value="pending" {selected["pending"]}>In progress</option>
+        <option value="pending" {selected["pending"]}>EXECUTED</option>
         <option value="success" {selected["success"]}>TP1 reached</option>
         <option value="failed" {selected["failed"]}>Invalidation</option>
       </select>
@@ -1551,19 +1561,23 @@ def _statistics_range_links(*, selected: str, query: str) -> str:
     return "".join(links)
 
 
-def _statistics_export_href(*, range_name: str, start_value: str, end_value: str, query: str) -> str:
+def _statistics_export_href(*, range_name: str, start_value: str, end_value: str, query: str, sort_by: str, sort_dir: str) -> str:
     return (
         f"/statistics/export.xlsx?range={quote_plus(range_name)}"
         f"&start={quote_plus(start_value)}"
         f"&end={quote_plus(end_value)}"
         f"&q={quote_plus(query)}"
+        f"&sort_by={quote_plus(sort_by)}"
+        f"&sort_dir={quote_plus(sort_dir)}"
     )
 
 
-def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str, query: str, export_href: str) -> str:
+def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str, query: str, export_href: str, sort_by: str, sort_dir: str) -> str:
     return f"""
     <form class="manual-form" method="get" action="/statistics">
       <input type="hidden" name="range" value="{escape(range_name)}">
+      <input type="hidden" name="sort_by" value="{escape(sort_by)}">
+      <input type="hidden" name="sort_dir" value="{escape(sort_dir)}">
       <input type="date" name="start" value="{escape(start_value)}">
       <input type="date" name="end" value="{escape(end_value)}">
       <input type="text" name="q" value="{escape(query)}" placeholder="Filter by symbol, e.g. BTC">
@@ -1586,7 +1600,7 @@ def _statistics_overview(snapshot) -> str:
     """
 
 
-def _statistics_table(rows: list) -> str:
+def _statistics_table(rows: list, *, range_name: str, start_value: str, end_value: str, query: str, sort_by: str, sort_dir: str) -> str:
     if not rows:
         return _empty_block("No setups matched the selected period and symbol filter.")
     rendered_rows = []
@@ -1611,15 +1625,15 @@ def _statistics_table(rows: list) -> str:
       <table>
         <thead>
           <tr>
-            <th>Symbol</th>
-            <th>Total</th>
-            <th>Wins</th>
-            <th>Losses</th>
+            <th>{_statistics_sort_link("Symbol", "symbol", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_statistics_sort_link("Total", "total", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_statistics_sort_link("Wins", "wins", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_statistics_sort_link("Losses", "losses", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
             <th>Pending</th>
             <th>Actionable</th>
             <th>Watchlist</th>
-            <th>Winrate</th>
-            <th>Avg confidence</th>
+            <th>{_statistics_sort_link("Winrate", "winrate", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_statistics_sort_link("Avg confidence", "avg_confidence", range_name=range_name, start_value=start_value, end_value=end_value, query=query, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
           </tr>
         </thead>
         <tbody>{''.join(rendered_rows)}</tbody>
@@ -1657,6 +1671,10 @@ async def _statistics_export_rows(
                 "Signal class": signal.signal_class,
                 "Confidence": round(float(signal.confidence), 2),
                 "Outcome": simulation.outcome,
+                "Entry price": round(float(signal.entry_price), 6),
+                "TP1 price": round(float(signal.targets[0]), 6) if signal.targets else "",
+                "TP2 price": round(float(signal.targets[1]), 6) if len(signal.targets) > 1 else "",
+                "SL price": round(float(signal.invalidation_price), 6),
                 "Trigger": trigger,
                 "Rationale": "\n".join(signal.rationale or []),
                 "Entry date": _format_date(simulation.entry_at, local_tz),
@@ -1726,6 +1744,46 @@ def _statistics_workbook(*, snapshot, range_name: str, start_local: date, end_lo
                 worksheet.column_dimensions[letter].width = min(max(max_length + 2, 12), 80)
     buffer.seek(0)
     return buffer
+
+
+def _statistics_sort_link(
+    label: str,
+    sort_key: str,
+    *,
+    range_name: str,
+    start_value: str,
+    end_value: str,
+    query: str,
+    current_sort_by: str,
+    current_sort_dir: str,
+) -> str:
+    next_dir = "asc" if current_sort_by != sort_key or current_sort_dir == "desc" else "desc"
+    marker = ""
+    if current_sort_by == sort_key:
+        marker = " ▲" if current_sort_dir == "asc" else " ▼"
+    href = (
+        f"/statistics?range={quote_plus(range_name)}"
+        f"&start={quote_plus(start_value)}"
+        f"&end={quote_plus(end_value)}"
+        f"&q={quote_plus(query)}"
+        f"&sort_by={quote_plus(sort_key)}"
+        f"&sort_dir={quote_plus(next_dir)}"
+    )
+    return f'<a href="{href}">{escape(label)}{marker}</a>'
+
+
+def _sort_statistics_rows(rows: list, *, sort_by: str, sort_dir: str) -> list:
+    reverse = sort_dir == "desc"
+    mapping = {
+        "symbol": lambda item: item.symbol,
+        "total": lambda item: item.total,
+        "wins": lambda item: item.success,
+        "losses": lambda item: item.failed,
+        "winrate": lambda item: item.win_rate,
+        "avg_confidence": lambda item: item.avg_confidence,
+    }
+    key_fn = mapping.get(sort_by, mapping["total"])
+    return sorted(rows, key=key_fn, reverse=reverse)
 
 
 def _empty_block(text: str) -> str:
