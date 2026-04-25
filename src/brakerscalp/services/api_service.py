@@ -83,6 +83,7 @@ def build_api(
         signal_count = await repository.signal_count()
         actionable_24h, watchlist_24h = await _signal_stats(repository)
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
+        risk_usdt = await _current_risk_usdt(cache, settings)
         cards = "".join(
             [
                 _metric_card("Сигналов в базе", str(signal_count), "Всего сохраненных решений."),
@@ -90,10 +91,11 @@ def build_api(
                 _metric_card("Watchlist 24ч", str(watchlist_24h), "Слабее actionable, но уже рядом с уровнем."),
                 _metric_card("Outbox", str(await cache.outbox_size()), _format_delivery_counts(delivery_counts)),
                 _metric_card("Min confidence", f"{minimum_alert_confidence:.1f}", "Minimum confidence required before a setup is sent to Telegram."),
+                _metric_card("Risk USDT", f"{risk_usdt:.2f}", "Maximum planned loss per setup, used to size Qty on the setups page."),
             ]
         )
         opportunities = _opportunities_table(screener[:10], local_tz)
-        setup_cards = "".join(_setup_card(item, local_tz) for item in setups) or _empty_block("Нет активных сетапов в окне 72 часов.")
+        setup_cards = "".join(_setup_card(item, local_tz, risk_usdt=risk_usdt) for item in setups) or _empty_block("Нет активных сетапов в окне 72 часов.")
         service_cards = "".join(_service_card(item) for item in service_statuses)
         venue_cards = "".join(_venue_health_card(item, local_tz) for item in venue_health[:8]) or _empty_block("Нет данных по venue health.")
         delivery_cards = "".join(_delivery_card(item, local_tz) for item in deliveries) or _empty_block("Нет записей по доставке.")
@@ -176,6 +178,7 @@ def build_api(
         q: str = Query(default=""),
         min_confidence: float | None = Query(default=None, ge=0.0, le=100.0),
     ) -> HTMLResponse:
+        risk_usdt = await _current_risk_usdt(cache, settings)
         all_setups = await inspector.list_active_setups(
             limit=250,
             outcome_filter="all",
@@ -188,7 +191,7 @@ def build_api(
             item for item in all_setups
             if selected_status == "all" or item.outcome == selected_status
         ][:limit]
-        cards = "".join(_setup_card(item, local_tz, include_meta=True) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
+        cards = "".join(_setup_card(item, local_tz, include_meta=True, risk_usdt=risk_usdt) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
         body = f"""
         <section class="hero compact">
           <div>
@@ -229,11 +232,13 @@ def build_api(
     async def settings_page(
         symbol: str | None = None,
         threshold_saved: int = 0,
+        risk_saved: int = 0,
         manage_symbol: str | None = None,
         universe_saved: str | None = None,
     ) -> HTMLResponse:
         scan = await inspector.manual_scan(symbol) if symbol else None
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
+        risk_usdt = await _current_risk_usdt(cache, settings)
         manual_card = _manual_scan_card(symbol, scan, local_tz) if symbol else _manual_scan_form("")
         runtime_universe = await inspector.list_universe()
         discovered_symbol, venue_probes = await inspector.discover_symbol_venues(manage_symbol or "") if manage_symbol else ("", [])
@@ -251,8 +256,8 @@ def build_api(
               <h2>Текущая конфигурация</h2>
               <a href="/debug/runtime-config">JSON</a>
             </div>
-            {_settings_table(settings, minimum_alert_confidence)}
-            {_runtime_settings_form(minimum_alert_confidence, threshold_saved=bool(threshold_saved))}
+            {_settings_table(settings, minimum_alert_confidence, risk_usdt)}
+            {_runtime_settings_form(minimum_alert_confidence, risk_usdt, threshold_saved=bool(threshold_saved), risk_saved=bool(risk_saved))}
           </div>
           <div class="panel">
             <div class="panel-head">
@@ -272,6 +277,11 @@ def build_api(
     async def apply_threshold(value: float = Query(ge=0.0, le=100.0)) -> RedirectResponse:
         await cache.set_minimum_alert_confidence(value)
         return RedirectResponse(url="/settings?threshold_saved=1", status_code=303)
+
+    @app.get("/settings/apply-risk")
+    async def apply_risk(value: float = Query(ge=0.01, le=1000000.0)) -> RedirectResponse:
+        await cache.set_risk_usdt(value)
+        return RedirectResponse(url="/settings?risk_saved=1", status_code=303)
 
     @app.get("/settings/universe/add")
     async def add_universe_symbol(symbol: str, venue: str) -> RedirectResponse:
@@ -493,6 +503,7 @@ def build_api(
     @app.get("/debug/runtime-config")
     async def debug_runtime_config() -> JSONResponse:
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
+        risk_usdt = await _current_risk_usdt(cache, settings)
         return JSONResponse(
             {
                 "app_name": settings.app_name,
@@ -506,6 +517,8 @@ def build_api(
                 "engine_interval_seconds": settings.engine_interval_seconds,
                 "minimum_alert_confidence": settings.minimum_alert_confidence,
                 "runtime_minimum_alert_confidence": minimum_alert_confidence,
+                "risk_usdt": settings.risk_usdt,
+                "runtime_risk_usdt": risk_usdt,
                 "exchange_book_depth": settings.exchange_book_depth,
                 "exchange_trades_limit": settings.exchange_trades_limit,
                 "universe_path": str(settings.universe_path),
@@ -535,6 +548,12 @@ async def _current_minimum_alert_confidence(cache: StateCache, settings: Setting
     if hasattr(cache, "get_minimum_alert_confidence"):
         return await cache.get_minimum_alert_confidence(settings.minimum_alert_confidence)
     return settings.minimum_alert_confidence
+
+
+async def _current_risk_usdt(cache: StateCache, settings: Settings) -> float:
+    if hasattr(cache, "get_risk_usdt"):
+        return await cache.get_risk_usdt(settings.risk_usdt)
+    return settings.risk_usdt
 
 
 def _resolve_statistics_window(
@@ -1220,7 +1239,25 @@ def _service_detail_card(item: dict[str, Any], local_tz: ZoneInfo) -> str:
     """
 
 
-def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False) -> str:
+def _format_qty(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _position_metrics(signal, risk_usdt: float) -> tuple[float | None, float | None, float | None]:
+    stop_distance = abs(float(signal.entry_price) - float(signal.invalidation_price))
+    if stop_distance <= 0 or risk_usdt <= 0:
+        return None, None, None
+    qty = float(risk_usdt) / stop_distance
+    tp1 = float(signal.targets[0]) if signal.targets else float(signal.entry_price)
+    tp2 = float(signal.targets[1]) if len(signal.targets) > 1 else tp1
+    tp1_profit = qty * abs(tp1 - float(signal.entry_price))
+    tp2_profit = qty * abs(tp2 - float(signal.entry_price))
+    return qty, tp1_profit, tp2_profit
+
+
+def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt: float = 0.0) -> str:
     signal = item.signal
     reason_lines = "".join(f"<li>{escape(line)}</li>" for line in (signal.rationale or [])[:4])
     why_lines = "".join(f"<li>{escape(line)}</li>" for line in (signal.why_not_higher or [])[:3])
@@ -1228,6 +1265,14 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False) -> str:
     level_zone = "n/a"
     if signal.render_context:
         level_zone = signal.render_context.get("price_zone", "n/a")
+    qty, tp1_profit, tp2_profit = _position_metrics(signal, risk_usdt)
+    tp1_value = float(signal.targets[0]) if signal.targets else float(signal.entry_price)
+    tp2_value = float(signal.targets[1]) if len(signal.targets) > 1 else tp1_value
+    targets_display = (
+        f"{tp1_value:.4f} ({tp1_profit:.2f} USDT) / {tp2_value:.4f} ({tp2_profit:.2f} USDT)"
+        if tp1_profit is not None and tp2_profit is not None
+        else f"{tp1_value:.4f} / {tp2_value:.4f}"
+    )
     meta = f"Обновлен {_format_dt(signal.detected_at, local_tz)} · {escape(signal.signal_class.upper())}" if include_meta else escape(signal.signal_class.upper())
     return f"""
     <article class="setup-card">
@@ -1245,7 +1290,8 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False) -> str:
           <div class="kv"><span>Timeframe</span>{escape(signal.timeframe)}</div>
           <div class="kv"><span>Entry</span>{signal.entry_price:.4f}</div>
           <div class="kv"><span>SL</span>{signal.invalidation_price:.4f}</div>
-          <div class="kv"><span>T1 / T2</span>{signal.targets[0]:.4f} / {signal.targets[1]:.4f}</div>
+          <div class="kv"><span>T1 / T2</span>{targets_display}</div>
+          <div class="kv"><span>Qty</span>{_format_qty(qty)}</div>
           <div class="kv"><span>Уровень</span>{escape(level_zone)}</div>
         </div>
         <h3>Обоснование</h3>
@@ -1382,7 +1428,7 @@ def _setups_filter_form(
     """
 
 
-def _settings_table(settings: Settings, minimum_alert_confidence: float) -> str:
+def _settings_table(settings: Settings, minimum_alert_confidence: float, risk_usdt: float) -> str:
     rows = [
         ("Окружение", settings.environment),
         ("Timezone", settings.timezone),
@@ -1391,6 +1437,8 @@ def _settings_table(settings: Settings, minimum_alert_confidence: float) -> str:
         ("Engine interval", f"{settings.engine_interval_seconds}s"),
         ("Min confidence env", f"{settings.minimum_alert_confidence:.1f}"),
         ("Min confidence runtime", f"{minimum_alert_confidence:.1f}"),
+        ("Risk USDT env", f"{settings.risk_usdt:.2f}"),
+        ("Risk USDT runtime", f"{risk_usdt:.2f}"),
         ("API bind", f"{settings.api_host}:{settings.api_port}"),
         ("Universe path", str(settings.universe_path)),
         ("Alert chats", ", ".join(map(str, settings.effective_alert_chat_ids))),
@@ -1411,8 +1459,15 @@ def _settings_table(settings: Settings, minimum_alert_confidence: float) -> str:
     """
 
 
-def _runtime_settings_form(minimum_alert_confidence: float, *, threshold_saved: bool) -> str:
-    saved = "<div class=\"muted\">Threshold saved. Engine will apply it on the next cycle.</div>" if threshold_saved else ""
+def _runtime_settings_form(
+    minimum_alert_confidence: float,
+    risk_usdt: float,
+    *,
+    threshold_saved: bool,
+    risk_saved: bool,
+) -> str:
+    threshold_message = "<div class=\"muted\">Threshold saved. Engine will apply it on the next cycle.</div>" if threshold_saved else ""
+    risk_message = "<div class=\"muted\">Risk USDT saved. Qty and projected TP profit are recalculated immediately in the UI.</div>" if risk_saved else ""
     return f"""
     <div class="scan-card">
       <h3>Telegram send threshold</h3>
@@ -1421,7 +1476,14 @@ def _runtime_settings_form(minimum_alert_confidence: float, *, threshold_saved: 
         <input type="number" name="value" min="0" max="100" step="0.1" value="{minimum_alert_confidence:.1f}">
         <button type="submit">Apply threshold</button>
       </form>
-      {saved}
+      {threshold_message}
+      <h3>Risk USDT</h3>
+      <div class="muted">Maximum planned loss per setup. Qty is calculated as Risk USDT divided by the distance between Entry and SL.</div>
+      <form class="manual-form" method="get" action="/settings/apply-risk">
+        <input type="number" name="value" min="0.01" max="1000000" step="0.01" value="{risk_usdt:.2f}">
+        <button type="submit">Apply risk</button>
+      </form>
+      {risk_message}
     </div>
     """
 

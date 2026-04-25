@@ -116,6 +116,20 @@ class StateCache:
         except (TypeError, ValueError):
             return float(default)
 
+    async def set_risk_usdt(self, value: float) -> None:
+        await self.redis.set(self._key("runtime", "risk-usdt"), str(float(value)).encode("utf-8"))
+
+    async def get_risk_usdt(self, default: float) -> float:
+        raw = await self.redis.get(self._key("runtime", "risk-usdt"))
+        if raw in (None, b"", ""):
+            return float(default)
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            return float(raw)
+        except (TypeError, ValueError):
+            return float(default)
+
     async def store_universe(self, symbols: list[UniverseSymbol]) -> None:
         await self.set_json(
             self._key("runtime", "universe"),

@@ -55,6 +55,7 @@ async def test_statistics_page_and_threshold_route_render(repository, cache) -> 
         statistics = await client.get("/statistics")
         export = await client.get("/statistics/export.xlsx")
         apply_threshold = await client.get("/settings/apply-threshold?value=74.5")
+        apply_risk = await client.get("/settings/apply-risk?value=33.25")
 
     assert statistics.status_code == 200
     assert "Setup Statistics" in statistics.text
@@ -65,7 +66,10 @@ async def test_statistics_page_and_threshold_route_render(repository, cache) -> 
     assert "attachment; filename=" in export.headers["content-disposition"]
     assert apply_threshold.status_code == 303
     assert apply_threshold.headers["location"] == "/settings?threshold_saved=1"
+    assert apply_risk.status_code == 303
+    assert apply_risk.headers["location"] == "/settings?risk_saved=1"
     assert await cache.get_minimum_alert_confidence(65.0) == 74.5
+    assert await cache.get_risk_usdt(25.0) == 33.25
 
 
 @pytest.mark.asyncio
@@ -318,6 +322,7 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
             ),
         ]
     )
+    await cache.set_risk_usdt(25.0)
 
     settings = Settings(
         _env_file=None,
@@ -335,6 +340,8 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
 
     assert response.status_code == 200
     assert "SOLUSDT" in response.text
+    assert "Qty" in response.text
+    assert "156.0000 (50.00 USDT) / 162.0000 (100.00 USDT)" in response.text
     assert 'value="success"' in response.text
     assert 'value="failed"' not in response.text
 
