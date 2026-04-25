@@ -172,16 +172,22 @@ def build_api(
     @app.get("/setups", response_class=HTMLResponse)
     async def setups_page(
         limit: int = Query(default=24, ge=1, le=100),
-        status: str = Query(default="all", pattern="^(all|pending|success|failed)$"),
+        status: str = Query(default="all"),
         q: str = Query(default=""),
         min_confidence: float | None = Query(default=None, ge=0.0, le=100.0),
     ) -> HTMLResponse:
-        setups = await inspector.list_active_setups(
-            limit=limit,
-            outcome_filter=status,
+        all_setups = await inspector.list_active_setups(
+            limit=250,
+            outcome_filter="all",
             symbol_query=q,
             minimum_confidence=min_confidence,
         )
+        available_statuses = _available_setup_statuses(all_setups)
+        selected_status = status if status == "all" or status in available_statuses else "all"
+        setups = [
+            item for item in all_setups
+            if selected_status == "all" or item.outcome == selected_status
+        ][:limit]
         cards = "".join(_setup_card(item, local_tz, include_meta=True) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
         body = f"""
         <section class="hero compact">
@@ -191,7 +197,7 @@ def build_api(
             <p class="hero-copy">Последние actionable и watchlist сигналы с графиками, точкой входа, SL, TP и статусом отработки.</p>
           </div>
         </section>
-        <section class="panel">{_setups_filter_form(status=status, symbol_query=q, limit=limit, min_confidence=min_confidence)}</section>
+        <section class="panel">{_setups_filter_form(status=selected_status, symbol_query=q, limit=limit, min_confidence=min_confidence, available_statuses=available_statuses)}</section>
         <section class="setup-grid large">{cards}</section>
         """
         return HTMLResponse(_page("Сетапы", "setups", body, refresh_seconds=30))
@@ -1343,19 +1349,33 @@ def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
     """
 
 
-def _setups_filter_form(*, status: str, symbol_query: str, limit: int, min_confidence: float | None) -> str:
-    selected = {"all": "", "pending": "", "success": "", "failed": ""}
-    selected[status] = "selected"
+def _available_setup_statuses(items: list) -> list[str]:
+    order = {"pending": 0, "success": 1, "failed": 2}
+    present = {item.outcome for item in items}
+    return sorted(present, key=lambda value: (order.get(value, 99), value))
+
+
+def _setups_filter_form(
+    *,
+    status: str,
+    symbol_query: str,
+    limit: int,
+    min_confidence: float | None,
+    available_statuses: list[str],
+) -> str:
+    selected = {"all": "selected" if status == "all" else ""}
+    options = ['<option value="all" ' + selected["all"] + '>All statuses</option>']
+    for value in available_statuses:
+        current = "selected" if status == value else ""
+        label = OUTCOME_LABELS.get(value, value.replace("_", " ").title())
+        options.append(f'<option value="{escape(value)}" {current}>{escape(label)}</option>')
     return f"""
     <form class="manual-form" method="get" action="/setups">
       <input type="text" name="q" value="{escape(symbol_query)}" placeholder="Filter by symbol, e.g. BTC">
       <input type="number" name="min_confidence" min="0" max="100" step="0.1" value="{'' if min_confidence is None else f'{min_confidence:.1f}'}" placeholder="Min confidence">
       <input type="hidden" name="limit" value="{limit}">
       <select name="status" class="filter-select">
-        <option value="all" {selected["all"]}>All statuses</option>
-        <option value="pending" {selected["pending"]}>EXECUTED</option>
-        <option value="success" {selected["success"]}>TP1 reached</option>
-        <option value="failed" {selected["failed"]}>Invalidation</option>
+        {''.join(options)}
       </select>
       <button type="submit">Apply</button>
     </form>

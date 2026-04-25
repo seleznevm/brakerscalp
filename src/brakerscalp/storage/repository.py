@@ -1,18 +1,34 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha1
+from typing import Any
 
 from sqlalchemy import Select, delete, desc, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from brakerscalp.domain.models import AlertMessage, DataHealth, LevelCandidate, MarketCandle, SignalDecision, UniverseSymbol, Venue
-from brakerscalp.storage.models import AlertDeliveryRecord, CandleRecord, LevelRecord, RuntimeUniverseRecord, SignalRecord, VenueHealthRecord
+from brakerscalp.storage.models import (
+    AlertDeliveryRecord,
+    CandleRecord,
+    LevelRecord,
+    RuntimeUniverseRecord,
+    SignalRecord,
+    StatisticsBySymbolRecord,
+    VenueHealthRecord,
+)
 
 
 class Repository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]):
         self.session_factory = session_factory
+
+    @staticmethod
+    def statistics_snapshot_key(start_at: datetime, end_at: datetime, symbol_query: str | None = None) -> str:
+        normalized_query = (symbol_query or "").strip().upper()
+        raw = f"{start_at.isoformat()}|{end_at.isoformat()}|{normalized_query}"
+        return sha1(raw.encode("utf-8")).hexdigest()
 
     async def upsert_candles(self, candles: list[MarketCandle]) -> None:
         if not candles:
@@ -435,3 +451,56 @@ class Repository:
                 delete(RuntimeUniverseRecord).where(RuntimeUniverseRecord.symbol == symbol)
             )
             await session.commit()
+
+    async def replace_statistics_snapshot(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        symbol_query: str | None,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        snapshot_key = self.statistics_snapshot_key(start_at, end_at, symbol_query)
+        normalized_query = (symbol_query or "").strip().upper()
+        now = datetime.now(tz=timezone.utc)
+        async with self.session_factory() as session:
+            await session.execute(
+                delete(StatisticsBySymbolRecord).where(StatisticsBySymbolRecord.snapshot_key == snapshot_key)
+            )
+            await session.flush()
+            for row in rows:
+                session.add(
+                    StatisticsBySymbolRecord(
+                        snapshot_key=snapshot_key,
+                        start_at=start_at,
+                        end_at=end_at,
+                        symbol_query=normalized_query,
+                        symbol=str(row["symbol"]),
+                        total=int(row["total"]),
+                        success=int(row["success"]),
+                        failed=int(row["failed"]),
+                        pending=int(row["pending"]),
+                        actionable=int(row["actionable"]),
+                        watchlist=int(row["watchlist"]),
+                        avg_confidence=float(row["avg_confidence"]),
+                        win_rate=float(row["win_rate"]),
+                        updated_at=now,
+                    )
+                )
+            await session.commit()
+
+    async def list_statistics_snapshot(
+        self,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        symbol_query: str | None = None,
+    ) -> list[StatisticsBySymbolRecord]:
+        snapshot_key = self.statistics_snapshot_key(start_at, end_at, symbol_query)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(StatisticsBySymbolRecord)
+                .where(StatisticsBySymbolRecord.snapshot_key == snapshot_key)
+                .order_by(StatisticsBySymbolRecord.symbol.asc())
+            )
+            return list(result.scalars())

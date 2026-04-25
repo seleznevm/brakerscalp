@@ -123,3 +123,26 @@ class RuntimeUniverseRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     primary_venue: Mapped[str] = mapped_column(String(32), index=True)
+
+
+class StatisticsBySymbolRecord(Base):
+    __tablename__ = "statistics_by_symbol"
+    __table_args__ = (
+        UniqueConstraint("snapshot_key", "symbol", name="uq_statistics_snapshot_symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_key: Mapped[str] = mapped_column(String(160), index=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    symbol_query: Mapped[str] = mapped_column(String(64), default="", index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    success: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    pending: Mapped[int] = mapped_column(Integer, default=0)
+    actionable: Mapped[int] = mapped_column(Integer, default=0)
+    watchlist: Mapped[int] = mapped_column(Integer, default=0)
+    avg_confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    win_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

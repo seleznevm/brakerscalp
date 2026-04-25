@@ -216,64 +216,85 @@ class MarketInspector:
                 "confidence_sum": 0.0,
             }
         )
-        overall = {
-            "total": 0,
-            "success": 0,
-            "failed": 0,
-            "pending": 0,
-            "actionable": 0,
-            "watchlist": 0,
-            "confidence_sum": 0.0,
-        }
 
         for signal in signals:
             if query and query not in signal.symbol.upper():
                 continue
             candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, end_at)
             outcome = classify_signal_outcome(signal, candles)
-            overall["total"] += 1
-            overall[outcome] += 1
-            overall[signal.signal_class] += 1
-            overall["confidence_sum"] += float(signal.confidence)
-
             bucket = by_symbol[signal.symbol]
             bucket["total"] += 1
             bucket[outcome] += 1
             bucket[signal.signal_class] += 1
             bucket["confidence_sum"] += float(signal.confidence)
 
-        rows: list[StatisticsRow] = []
+        rows_payload: list[dict[str, float | int | str]] = []
         for symbol, values in by_symbol.items():
             resolved = int(values["success"] + values["failed"])
             win_rate = (float(values["success"]) / resolved * 100.0) if resolved else 0.0
             avg_confidence = (float(values["confidence_sum"]) / float(values["total"])) if values["total"] else 0.0
-            rows.append(
-                StatisticsRow(
-                    symbol=symbol,
-                    total=int(values["total"]),
-                    success=int(values["success"]),
-                    failed=int(values["failed"]),
-                    pending=int(values["pending"]),
-                    actionable=int(values["actionable"]),
-                    watchlist=int(values["watchlist"]),
-                    avg_confidence=avg_confidence,
-                    win_rate=win_rate,
-                )
+            rows_payload.append(
+                {
+                    "symbol": symbol,
+                    "total": int(values["total"]),
+                    "success": int(values["success"]),
+                    "failed": int(values["failed"]),
+                    "pending": int(values["pending"]),
+                    "actionable": int(values["actionable"]),
+                    "watchlist": int(values["watchlist"]),
+                    "avg_confidence": avg_confidence,
+                    "win_rate": win_rate,
+                }
             )
+        await self.repository.replace_statistics_snapshot(
+            start_at=start_at,
+            end_at=end_at,
+            symbol_query=query,
+            rows=rows_payload,
+        )
+        persisted_rows = await self.repository.list_statistics_snapshot(
+            start_at=start_at,
+            end_at=end_at,
+            symbol_query=query,
+        )
+        rows = [
+            StatisticsRow(
+                symbol=item.symbol,
+                total=item.total,
+                success=item.success,
+                failed=item.failed,
+                pending=item.pending,
+                actionable=item.actionable,
+                watchlist=item.watchlist,
+                avg_confidence=float(item.avg_confidence),
+                win_rate=float(item.win_rate),
+            )
+            for item in persisted_rows
+        ]
         rows.sort(key=lambda item: (-item.total, -item.win_rate, item.symbol))
 
-        resolved = int(overall["success"] + overall["failed"])
-        overall_win_rate = (float(overall["success"]) / resolved * 100.0) if resolved else 0.0
-        overall_avg_confidence = (float(overall["confidence_sum"]) / float(overall["total"])) if overall["total"] else 0.0
+        total = sum(item.total for item in rows)
+        success = sum(item.success for item in rows)
+        failed = sum(item.failed for item in rows)
+        pending = sum(item.pending for item in rows)
+        actionable = sum(item.actionable for item in rows)
+        watchlist = sum(item.watchlist for item in rows)
+        resolved = success + failed
+        overall_win_rate = (success / resolved * 100.0) if resolved else 0.0
+        overall_avg_confidence = (
+            sum(item.avg_confidence * item.total for item in rows) / total
+            if total
+            else 0.0
+        )
         return StatisticsSnapshot(
             start_at=start_at,
             end_at=end_at,
-            total=int(overall["total"]),
-            success=int(overall["success"]),
-            failed=int(overall["failed"]),
-            pending=int(overall["pending"]),
-            actionable=int(overall["actionable"]),
-            watchlist=int(overall["watchlist"]),
+            total=total,
+            success=success,
+            failed=failed,
+            pending=pending,
+            actionable=actionable,
+            watchlist=watchlist,
             avg_confidence=overall_avg_confidence,
             win_rate=overall_win_rate,
             rows=rows,
