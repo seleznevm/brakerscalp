@@ -131,6 +131,7 @@ class RuleEngine:
         "structure_pressure": 20.0,
         "breakout_confirmation": 15.0,
     }
+    minimum_expected_rr = 2.0
 
     def evaluate(self, payload: EngineInput) -> SignalDecision | None:
         return self.inspect(payload).decision
@@ -584,9 +585,13 @@ class RuleEngine:
         else:
             invalidation = max(structure.anchor_price + atr_15m * 0.10, level.upper_price + atr_15m * 0.15)
         risk = max(abs(entry_price - invalidation), atr_15m * 0.22)
-        t1 = entry_price + (risk * 1.2 if direction == Direction.LONG else -risk * 1.2)
-        t2 = entry_price + (risk * 2.0 if direction == Direction.LONG else -risk * 2.0)
+        targets = self._project_targets(payload.levels, level, direction, entry_price, risk)
+        if targets is None:
+            return None
+        t1, t2 = targets
         expected_rr = abs((t1 - entry_price) / risk)
+        if expected_rr < self.minimum_expected_rr:
+            return None
         stage = "confirmed" if confirmed_breakout else "arming"
         alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{Timeframe.M15.value}:{current.close_time.isoformat()}:{stage}"
 
@@ -605,6 +610,8 @@ class RuleEngine:
             why_not_higher.append("Нет уверенного follow-through на 5m после закрытия breakout-свечи.")
         if not breakout.cross_ok:
             why_not_higher.append("Кросс-биржевое подтверждение слабее, чем хотелось бы.")
+        if expected_rr < 2.4:
+            why_not_higher.append(f"Expected R:R remains close to the minimum threshold: {expected_rr:.2f}.")
         if not why_not_higher:
             why_not_higher.append("Сетап сильный, но confidence дополнительно ограничен до накопления live-статистики.")
 
@@ -645,6 +652,7 @@ class RuleEngine:
             "stop_price": invalidation,
             "tp1": round(t1, 6),
             "tp2": round(t2, 6),
+            "minimum_expected_rr": self.minimum_expected_rr,
             "chart_timeframe": Timeframe.M15.value,
             "setup_stage": stage,
             "trend_bias": trend.bias.value if trend.bias else None,
@@ -690,6 +698,49 @@ class RuleEngine:
             },
             render_context=render_context,
         )
+
+    def _project_targets(
+        self,
+        levels: list[LevelCandidate],
+        active_level: LevelCandidate,
+        direction: Direction,
+        entry_price: float,
+        risk: float,
+    ) -> tuple[float, float] | None:
+        minimum_target_price = entry_price + (risk * self.minimum_expected_rr if direction == Direction.LONG else -risk * self.minimum_expected_rr)
+        fallback_t1 = minimum_target_price
+        fallback_t2 = entry_price + (risk * 3.0 if direction == Direction.LONG else -risk * 3.0)
+        projected: list[float] = []
+        for level in levels:
+            if level.level_id == active_level.level_id:
+                continue
+            target_price = self._target_price_for_level(level, direction)
+            if target_price is None:
+                continue
+            if direction == Direction.LONG and target_price <= minimum_target_price:
+                continue
+            if direction == Direction.SHORT and target_price >= minimum_target_price:
+                continue
+            projected.append(target_price)
+
+        projected = sorted(set(projected), reverse=(direction == Direction.SHORT))
+        if not projected:
+            return (fallback_t1, fallback_t2)
+
+        t1 = projected[0]
+        t2 = projected[1] if len(projected) > 1 else fallback_t2
+        if direction == Direction.LONG:
+            t2 = max(t2, t1 + risk * 0.75)
+        else:
+            t2 = min(t2, t1 - risk * 0.75)
+        return (t1, t2)
+
+    def _target_price_for_level(self, level: LevelCandidate, direction: Direction) -> float | None:
+        if direction == Direction.LONG and level.kind == LevelKind.RESISTANCE:
+            return float(level.lower_price)
+        if direction == Direction.SHORT and level.kind == LevelKind.SUPPORT:
+            return float(level.upper_price)
+        return None
 
     def _cascade_touches(self, candles_1h: list[MarketCandle], level: LevelCandidate, atr_15m: float) -> int:
         tolerance = max(atr_15m * 0.25, level.reference_price * 0.0012)

@@ -154,6 +154,10 @@ async def test_statistics_export_contains_trade_simulation_columns(repository, c
 
     assert "Trigger" in headers
     assert "Rationale" in headers
+    assert "Entry price" in headers
+    assert "TP1 price" in headers
+    assert "TP2 price" in headers
+    assert "SL price" in headers
     assert "Entry date" in headers
     assert "TP1 date" in headers
     assert "Final PnL %" in headers
