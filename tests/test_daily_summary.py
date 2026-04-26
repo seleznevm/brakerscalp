@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from brakerscalp.services.daily_summary import SignalOutcome, classify_signal_outcome, render_daily_summary
+from brakerscalp.services.daily_summary import SignalOutcome, classify_signal_outcome, evaluate_setup_lifecycle, render_daily_summary
 from brakerscalp.storage.models import CandleRecord, SignalRecord
 
 
@@ -62,6 +62,30 @@ def test_classify_signal_outcome_failed_for_short() -> None:
     signal = make_signal(direction="short")
     candles = [make_candle(high=106.0, low=94.0)]
     assert classify_signal_outcome(signal, candles) == "failed"
+
+
+def test_evaluate_setup_lifecycle_watch_before_entry() -> None:
+    signal = make_signal(direction="long")
+    candles = [make_candle(high=99.5, low=97.5)]
+    lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=signal.detected_at + timedelta(hours=2))
+    assert lifecycle.status == "watch"
+    assert lifecycle.entry_at is None
+
+
+def test_evaluate_setup_lifecycle_executed_after_entry() -> None:
+    signal = make_signal(direction="long")
+    candles = [make_candle(high=101.0, low=99.0)]
+    lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=signal.detected_at + timedelta(hours=2))
+    assert lifecycle.status == "executed"
+    assert lifecycle.entry_at is not None
+
+
+def test_evaluate_setup_lifecycle_invalidated_when_expired() -> None:
+    signal = make_signal(direction="long")
+    candles = [make_candle(high=99.0, low=97.0)]
+    lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=signal.detected_at + timedelta(hours=10))
+    assert lifecycle.status == "invalidation"
+    assert lifecycle.exit_reason == "EXPIRED"
 
 
 def test_render_daily_summary_contains_hit_rate_and_lists() -> None:

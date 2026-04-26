@@ -137,17 +137,18 @@ class RuleEngine:
         return self.inspect(payload).decision
 
     def inspect(self, payload: EngineInput) -> ScreeningResult:
-        if len(payload.candles_15m) < 25 or len(payload.candles_1h) < 60 or len(payload.candles_4h) < 20 or not payload.levels:
+        if len(payload.candles_5m) < 40 or len(payload.candles_15m) < 25 or len(payload.candles_1h) < 60 or len(payload.candles_4h) < 20 or not payload.levels:
             return self._empty_result(
                 payload=payload,
                 status="insufficient",
                 notes=["Недостаточно истории свечей или уровней для оценки сетапа."],
             )
 
-        current = payload.candles_15m[-1]
+        current = payload.candles_5m[-1]
+        atr_5m = average_true_range(payload.candles_5m[-40:] or payload.candles_5m, period=14)
         atr_15m = average_true_range(payload.candles_15m[-30:] or payload.candles_15m, period=14)
         atr_1h = average_true_range(payload.candles_1h[-40:] or payload.candles_1h, period=14)
-        if atr_15m <= 0 or atr_1h <= 0:
+        if atr_5m <= 0 or atr_15m <= 0 or atr_1h <= 0:
             return self._empty_result(
                 payload=payload,
                 status="insufficient",
@@ -156,12 +157,12 @@ class RuleEngine:
 
         trend = self._trend_state(payload.candles_1h, payload.candles_4h)
         coin = self._coin_in_play(payload.candles_15m, payload.candles_1h)
-        candidates = self._candidate_levels(current, payload.levels, atr_15m)
+        candidates = self._candidate_levels(current, payload.levels, max(atr_5m, atr_15m * 0.35))
         if not candidates:
             return self._empty_result(
                 payload=payload,
                 status="cold",
-                atr_15m=atr_15m,
+                atr_15m=atr_5m,
                 trend=trend,
                 coin=coin,
                 notes=["Рядом с текущей ценой нет рабочего HTF уровня для breakout scalp."],
@@ -169,14 +170,14 @@ class RuleEngine:
 
         best_bundle: tuple[float, LevelCandidate, Direction, StructureState, BreakoutState, float, list[ScoreContribution], SignalDecision | None] | None = None
         for level in candidates[:8]:
-            direction = self._breakout_direction(current, level, atr_15m) or self._default_direction(level)
+            direction = self._breakout_direction(current, level, atr_5m) or self._default_direction(level)
             structure = self._structure_state(payload.candles_15m, payload.candles_1h, level, atr_15m, direction)
             breakout = self._breakout_state(
                 current=current,
                 candles_15m=payload.candles_15m,
                 candles_5m=payload.candles_5m,
                 level=level,
-                atr_15m=atr_15m,
+                atr_15m=atr_5m,
                 direction=direction,
                 book=payload.book,
                 health=payload.health,
@@ -277,7 +278,7 @@ class RuleEngine:
         trend: TrendState | None = None,
         coin: CoinState | None = None,
     ) -> ScreeningResult:
-        current = payload.candles_15m[-1] if payload.candles_15m else None
+        current = payload.candles_5m[-1] if payload.candles_5m else payload.candles_15m[-1] if payload.candles_15m else None
         return ScreeningResult(
             symbol=payload.symbol,
             venue=payload.venue,
@@ -469,14 +470,14 @@ class RuleEngine:
     ) -> BreakoutState:
         candle_range = max(current.high - current.low, 1e-9)
         body_ratio = abs(current.close - current.open) / candle_range
-        recent_ranges = [item.high - item.low for item in candles_15m[-21:-1]]
+        recent_ranges = [item.high - item.low for item in candles_5m[-25:-1]]
         range_expansion = candle_range / max(median_spread(recent_ranges), 1e-9)
-        volume_z = volume_zscore(candles_15m[-25:], period=20)
+        volume_z = volume_zscore(candles_5m[-40:], period=30)
         book_imbalance = self._book_imbalance(book)
         spread_ratio = health.spread_ratio
         fresh_cross = [item for item in cross_venue_health if item.venue != health.venue and item.is_fresh]
         cross_ok = True if not cross_venue_health else len(fresh_cross) >= 1
-        data_ok = health.is_fresh and not health.has_sequence_gap and spread_ratio <= 5.0
+        data_ok = health.is_fresh and not health.has_sequence_gap and spread_ratio <= 3.5
 
         if direction == Direction.LONG:
             breakout_distance_atr = (current.close - level.upper_price) / max(atr_15m, 1e-9)
@@ -490,21 +491,23 @@ class RuleEngine:
         follow_through_5m = self._follow_through_5m(candles_5m[-3:], level, direction)
         signal_ready = (
             data_ok
-            and breakout_distance_atr >= 0.03
-            and body_ratio >= 0.42
-            and close_to_extreme <= 0.45
-            and volume_z >= 0.60
-            and range_expansion >= 0.95
-            and (follow_through_5m or breakout_distance_atr >= 0.12 or book_support)
+            and breakout_distance_atr >= 0.18
+            and body_ratio >= 0.58
+            and close_to_extreme <= 0.22
+            and volume_z >= 1.80
+            and range_expansion >= 1.25
+            and follow_through_5m
+            and book_support
+            and cross_ok
         )
         score = min(
             1.0,
-            min(max(breakout_distance_atr, 0.0) / 0.28, 1.0) * 0.28
-            + min(body_ratio / 0.70, 1.0) * 0.22
-            + min(max(volume_z, 0.0) / 2.5, 1.0) * 0.18
-            + min(range_expansion / 1.6, 1.0) * 0.14
+            min(max(breakout_distance_atr, 0.0) / 0.40, 1.0) * 0.28
+            + min(body_ratio / 0.80, 1.0) * 0.24
+            + min(max(volume_z, 0.0) / 3.0, 1.0) * 0.20
+            + min(range_expansion / 1.8, 1.0) * 0.12
             + (0.10 if follow_through_5m else 0.0)
-            + (0.08 if book_support else 0.0),
+            + (0.06 if book_support else 0.0),
         )
         return BreakoutState(
             signal_ready=signal_ready,
@@ -571,7 +574,7 @@ class RuleEngine:
         signal_class = self._classify(confidence) if confirmed_breakout else SignalClass.WATCHLIST
         if confirmed_breakout and signal_class == SignalClass.SUPPRESSED:
             return None
-        if not confirmed_breakout and confidence < 64:
+        if not confirmed_breakout and confidence < 82:
             return None
 
         if confirmed_breakout:
@@ -592,8 +595,8 @@ class RuleEngine:
         expected_rr = abs((t1 - entry_price) / risk)
         if expected_rr < self.minimum_expected_rr:
             return None
-        stage = "confirmed" if confirmed_breakout else "arming"
-        alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{Timeframe.M15.value}:{current.close_time.isoformat()}:{stage}"
+        stage = "confirmed" if confirmed_breakout else "watch"
+        alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{Timeframe.M5.value}:{level.detected_at.date().isoformat()}"
 
         why_not_higher: list[str] = []
         if not confirmed_breakout:
@@ -624,7 +627,7 @@ class RuleEngine:
             (
                 f"Подтверждение импульса: {breakout.breakout_distance_atr:.2f} ATR за уровнем, volume z {breakout.volume_z:.2f}, 5m follow-through {'да' if breakout.follow_through_5m else 'нет'}."
                 if confirmed_breakout
-                else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 15m close за зоной."
+                else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
             ),
         ]
         if payload.derivative_context is not None:
@@ -653,7 +656,7 @@ class RuleEngine:
             "tp1": round(t1, 6),
             "tp2": round(t2, 6),
             "minimum_expected_rr": self.minimum_expected_rr,
-            "chart_timeframe": Timeframe.M15.value,
+            "chart_timeframe": Timeframe.M5.value,
             "setup_stage": stage,
             "trend_bias": trend.bias.value if trend.bias else None,
             "cascade_touches": structure.cascade_touches,
@@ -663,7 +666,7 @@ class RuleEngine:
         return SignalDecision(
             symbol=payload.symbol,
             venue=payload.venue,
-            timeframe=Timeframe.M15,
+            timeframe=Timeframe.M5,
             setup=SetupType.BREAKOUT,
             direction=direction,
             signal_class=signal_class,
@@ -814,8 +817,8 @@ class RuleEngine:
         if direction == Direction.SHORT and confirmed_breakout:
             return f"15m закрылась ниже зоны поддержки на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
         if direction == Direction.LONG:
-            return f"Цена стоит под сопротивлением. Для входа нужен 15m close выше {entry_price:.4f}."
-        return f"Цена стоит над поддержкой. Для входа нужен 15m close ниже {entry_price:.4f}."
+            return f"Цена стоит под сопротивлением. Для входа нужен 5m close выше {entry_price:.4f}."
+        return f"Цена стоит над поддержкой. Для входа нужен 5m close ниже {entry_price:.4f}."
 
     def _stop_logic(
         self,
@@ -853,11 +856,15 @@ class RuleEngine:
     ) -> bool:
         return (
             breakout.data_ok
-            and confidence >= 68
-            and breakout.breakout_distance_atr >= -0.55
-            and structure.score >= 0.48
-            and structure.near_level_atr <= 0.95
-            and (coin.is_active or coin.score >= 0.15 or breakout.volume_z >= 0.65)
+            and confidence >= 82
+            and breakout.breakout_distance_atr >= -0.22
+            and structure.score >= 0.72
+            and structure.cascade_touches >= 3
+            and structure.squeeze_score >= 0.72
+            and structure.near_level_atr <= 0.35
+            and coin.is_active
+            and coin.score >= 0.58
+            and breakout.volume_z >= 1.05
             and level.kind in {LevelKind.RESISTANCE, LevelKind.SUPPORT}
         )
 
@@ -903,8 +910,8 @@ class RuleEngine:
         return notes
 
     def _classify(self, confidence: float) -> SignalClass:
-        if confidence >= 74:
+        if confidence >= 88:
             return SignalClass.ACTIONABLE
-        if confidence >= 58:
+        if confidence >= 80:
             return SignalClass.WATCHLIST
         return SignalClass.SUPPRESSED

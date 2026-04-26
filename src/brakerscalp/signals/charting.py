@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import matplotlib
 
@@ -28,7 +29,7 @@ class SignalLike(Protocol):
     render_context: dict
 
 
-def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes | None:
+def render_signal_chart(candles: list[CandleLike], signal: SignalLike, *, timezone_name: str | None = None) -> bytes | None:
     if len(candles) < 5:
         return None
 
@@ -52,7 +53,8 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
     for spine in ax.spines.values():
         spine.set_color("#3c5566")
 
-    x_values = [mdates.date2num(item.open_time) for item in window]
+    chart_tz = _chart_timezone(timezone_name)
+    x_values = [mdates.date2num(_normalize_datetime(item.open_time, chart_tz)) for item in window]
     candle_width = 0.007
     for x_pos, candle in zip(x_values, window, strict=True):
         color = "#35c48f" if candle.close >= candle.open else "#ff6b6b"
@@ -89,7 +91,7 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
     )
 
     ax.set_title(f"{signal.symbol}  |  {timeframe}  |  breakout scalp", color="#f7fbff", fontsize=12, pad=10, loc="left")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=chart_tz))
     ax.tick_params(axis="x", rotation=20)
     ax.legend(facecolor="#12212b", edgecolor="#2c4759", labelcolor="#d7e3ea", fontsize=8, loc="upper left")
 
@@ -97,3 +99,20 @@ def render_signal_chart(candles: list[CandleLike], signal: SignalLike) -> bytes 
     fig.savefig(buffer, format="png", dpi=140)
     plt.close(fig)
     return buffer.getvalue()
+
+
+def _chart_timezone(timezone_name: str | None) -> ZoneInfo | None:
+    if not timezone_name:
+        return None
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return None
+
+
+def _normalize_datetime(value: object, chart_tz: ZoneInfo | None):
+    if chart_tz is None or not hasattr(value, "astimezone"):
+        return value
+    if getattr(value, "tzinfo", None) is None:
+        return value.replace(tzinfo=ZoneInfo("UTC")).astimezone(chart_tz)
+    return value.astimezone(chart_tz)

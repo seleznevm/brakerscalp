@@ -49,15 +49,21 @@ STATUS_TONES = {
 }
 
 OUTCOME_LABELS = {
-    "pending": "EXECUTED",
-    "success": "TP1 достигнут",
-    "failed": "Инвалидация",
+    "watch": "WATCH",
+    "executed": "EXECUTED",
+    "tp1": "TP1",
+    "tp2": "TP2",
+    "loss": "LOSS",
+    "invalidation": "INVALIDATION",
 }
 
 OUTCOME_TONES = {
-    "pending": "accent",
-    "success": "good",
-    "failed": "danger",
+    "watch": "warn",
+    "executed": "accent",
+    "tp1": "good",
+    "tp2": "good",
+    "loss": "danger",
+    "invalidation": "danger",
 }
 
 
@@ -189,7 +195,7 @@ def build_api(
         selected_status = status if status == "all" or status in available_statuses else "all"
         setups = [
             item for item in all_setups
-            if selected_status == "all" or item.outcome == selected_status
+            if selected_status == "all" or item.lifecycle.status == selected_status
         ][:limit]
         cards = "".join(_setup_card(item, local_tz, include_meta=True, risk_usdt=risk_usdt) for item in setups) or _empty_block("Нет сетапов в заданном окне.")
         body = f"""
@@ -375,18 +381,19 @@ def build_api(
         end: str | None = None,
         q: str = Query(default=""),
     ) -> Response:
-        start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=range, start=start, end=end, local_tz=local_tz)
+        effective_range = "custom" if start and end else range
+        start_local, end_local, start_utc, end_utc = _resolve_statistics_window(range_name=effective_range, start=start, end=end, local_tz=local_tz)
         snapshot = await inspector.build_statistics(start_at=start_utc, end_at=end_utc, symbol_query=q)
         export_rows = await _statistics_export_rows(repository, inspector, local_tz, start_utc, end_utc, q)
         workbook = _statistics_workbook(
             snapshot=snapshot,
-            range_name=range,
+            range_name=effective_range,
             start_local=start_local,
             end_local=end_local,
             symbol_query=q,
             export_rows=export_rows,
         )
-        filename = f"brakerscalp-statistics-{range}-{start_local.isoformat()}-{(end_local - timedelta(days=1)).isoformat()}.xlsx"
+        filename = f"brakerscalp-statistics-{effective_range}-{start_local.isoformat()}-{(end_local - timedelta(days=1)).isoformat()}.xlsx"
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
         return Response(
             content=workbook.getvalue(),
@@ -1259,6 +1266,7 @@ def _position_metrics(signal, risk_usdt: float) -> tuple[float | None, float | N
 
 def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt: float = 0.0) -> str:
     signal = item.signal
+    lifecycle = item.lifecycle
     reason_lines = "".join(f"<li>{escape(line)}</li>" for line in (signal.rationale or [])[:4])
     why_lines = "".join(f"<li>{escape(line)}</li>" for line in (signal.why_not_higher or [])[:3])
     chart_url = f"/charts/signal/{quote_plus(signal.decision_id)}.png"
@@ -1273,7 +1281,7 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
         if tp1_profit is not None and tp2_profit is not None
         else f"{tp1_value:.4f} / {tp2_value:.4f}"
     )
-    meta = f"Обновлен {_format_dt(signal.detected_at, local_tz)} · {escape(signal.signal_class.upper())}" if include_meta else escape(signal.signal_class.upper())
+    meta = f"Signal class: {escape(signal.signal_class.upper())}" if include_meta else escape(signal.signal_class.upper())
     return f"""
     <article class="setup-card">
       <div class="top">
@@ -1281,7 +1289,7 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
           <h3>{escape(signal.symbol)} · {escape(signal.setup.upper())} · {escape(signal.direction.upper())}</h3>
           <div class="meta">{meta}</div>
         </div>
-        <div>{_outcome_badge(item.outcome)}</div>
+        <div>{_outcome_badge(lifecycle.status)}</div>
       </div>
       <img src="{chart_url}" alt="{escape(signal.symbol)} chart">
       <div class="body">
@@ -1300,7 +1308,7 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
         <ul class="bullets">{why_lines}</ul>
         <div class="setup-footer">
           <span class="muted">Call time</span>
-          <strong>{_format_dt(signal.detected_at, local_tz)}</strong>
+          <strong>{_format_dt(lifecycle.call_at, local_tz)}</strong>
         </div>
       </div>
     </article>
@@ -1396,8 +1404,8 @@ def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
 
 
 def _available_setup_statuses(items: list) -> list[str]:
-    order = {"pending": 0, "success": 1, "failed": 2}
-    present = {item.outcome for item in items}
+    order = {"watch": 0, "executed": 1, "tp1": 2, "tp2": 3, "loss": 4, "invalidation": 5}
+    present = {item.lifecycle.status for item in items}
     return sorted(present, key=lambda value: (order.get(value, 99), value))
 
 
@@ -1664,7 +1672,7 @@ def _statistics_filter_form(*, range_name: str, start_value: str, end_value: str
       <input type="date" name="end" value="{escape(end_value)}">
       <input type="text" name="q" value="{escape(query)}" placeholder="Filter by symbol, e.g. BTC">
       <button type="submit">Apply range</button>
-      <a class="button-link" href="{escape(export_href)}">Export Excel</a>
+      <button class="button-link" type="submit" formaction="/statistics/export.xlsx">Export Excel</button>
     </form>
     """
 
@@ -1735,23 +1743,28 @@ async def _statistics_export_rows(
     signals = await repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
     query = symbol_query.strip().upper()
     rows: list[dict[str, Any]] = []
-    for signal in signals:
+    grouped_signals = inspector._group_signals_by_setup(signals)
+    for group in grouped_signals.values():
+        signal = group[0]
         if query and query not in signal.symbol.upper():
             continue
         simulation = await inspector.simulate_trade(signal, end_at=end_at)
         trigger = ""
+        level_zone = ""
         if signal.render_context:
             trigger = str(signal.render_context.get("trigger", ""))
+            level_zone = str(signal.render_context.get("price_zone", ""))
         rows.append(
             {
-                "Call date": _format_date(signal.detected_at, local_tz),
-                "Call time": _format_time(signal.detected_at, local_tz),
+                "Call date": _format_date(simulation.call_at, local_tz),
+                "Call time": _format_time(simulation.call_at, local_tz),
                 "Symbol": signal.symbol,
                 "Venue": signal.venue.upper(),
                 "Setup": signal.setup.upper(),
                 "Direction": signal.direction.upper(),
                 "Signal class": signal.signal_class,
                 "Confidence": round(float(signal.confidence), 2),
+                "Level zone": level_zone,
                 "Outcome": simulation.outcome,
                 "Entry price": round(float(signal.entry_price), 6),
                 "TP1 price": round(float(signal.targets[0]), 6) if signal.targets else "",

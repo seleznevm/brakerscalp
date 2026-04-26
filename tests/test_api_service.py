@@ -61,6 +61,7 @@ async def test_statistics_page_and_threshold_route_render(repository, cache) -> 
     assert "Setup Statistics" in statistics.text
     assert "/statistics?range=week" in statistics.text
     assert "Export Excel" in statistics.text
+    assert 'formaction="/statistics/export.xlsx"' in statistics.text
     assert export.status_code == 200
     assert export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     assert "attachment; filename=" in export.headers["content-disposition"]
@@ -167,6 +168,31 @@ async def test_statistics_export_contains_trade_simulation_columns(repository, c
     assert "Final PnL %" in headers
     assert "Trade duration" in headers
     assert "BTCUSDT" in values
+
+
+@pytest.mark.asyncio
+async def test_statistics_export_uses_submitted_dates_even_when_range_is_not_custom(repository, cache) -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        export = await client.get("/statistics/export.xlsx?range=day&start=2026-04-20&end=2026-04-22")
+
+    workbook = openpyxl.load_workbook(BytesIO(export.content))
+    summary_sheet = workbook["summary"]
+    summary_rows = {summary_sheet[f"A{row}"].value: summary_sheet[f"B{row}"].value for row in range(2, 6)}
+
+    assert summary_rows["Range"] == "custom"
+    assert summary_rows["Start date"] == "2026-04-20"
+    assert summary_rows["End date"] == "2026-04-22"
 
 
 @pytest.mark.asyncio
@@ -342,8 +368,89 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
     assert "SOLUSDT" in response.text
     assert "Qty" in response.text
     assert "156.0000 (50.00 USDT) / 162.0000 (100.00 USDT)" in response.text
-    assert 'value="success"' in response.text
-    assert 'value="failed"' not in response.text
+    assert 'value="tp1"' in response.text
+    assert 'value="loss"' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_setups_page_uses_first_call_time_for_grouped_setup(repository, cache) -> None:
+    first_detected_at = datetime(2026, 4, 25, 3, 0, tzinfo=timezone.utc)
+    second_detected_at = first_detected_at + timedelta(hours=2)
+    base_kwargs = dict(
+        symbol="BTCUSDT",
+        venue=Venue.BINANCE,
+        timeframe=Timeframe.M5,
+        setup=SetupType.BREAKOUT,
+        direction=Direction.LONG,
+        signal_class=SignalClass.ACTIONABLE,
+        confidence=91.0,
+        level_id="btc-level-1",
+        entry_price=100.0,
+        invalidation_price=95.0,
+        targets=[110.0, 120.0],
+        expected_rr=2.0,
+        rationale=["Momentum aligned"],
+        why_not_higher=["Need more samples"],
+        contributions=[ScoreContribution(group="level", score=20.0, max_score=25.0, reason="Strong level")],
+        data_health=DataHealth(venue=Venue.BINANCE, symbol="BTCUSDT", is_fresh=True, freshness_ms=0),
+        feature_snapshot={"atr_15m": 2.0},
+        render_context={"trigger": "5m close above 100.0", "price_zone": "99.0 - 100.0"},
+    )
+    await repository.save_signal(
+        SignalDecision(
+            decision_id="btc-first-call",
+            alert_key="btc-first-call",
+            detected_at=first_detected_at,
+            **base_kwargs,
+        )
+    )
+    await repository.save_signal(
+        SignalDecision(
+            decision_id="btc-second-call",
+            alert_key="btc-second-call",
+            detected_at=second_detected_at,
+            **base_kwargs,
+        )
+    )
+    await repository.upsert_candles(
+        [
+            MarketCandle(
+                symbol="BTCUSDT",
+                venue=Venue.BINANCE,
+                timeframe=Timeframe.M5,
+                open_time=first_detected_at - timedelta(minutes=5),
+                close_time=first_detected_at,
+                open=99.0,
+                high=100.5,
+                low=98.8,
+                close=100.1,
+                volume=1000.0,
+                quote_volume=100100.0,
+                trade_count=10,
+                taker_buy_volume=520.0,
+                vwap=99.8,
+            )
+        ]
+    )
+
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+        timezone="Asia/Bangkok",
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        response = await client.get("/setups")
+
+    assert response.status_code == 200
+    assert "25.04.2026 10:00:00" in response.text
+    assert "25.04.2026 12:00:00" not in response.text
 
 
 @pytest.mark.asyncio

@@ -129,7 +129,7 @@ class EngineService:
             setup=decision.setup.value,
             direction=decision.direction.value,
             level_id=decision.level_id,
-            within_minutes=self.signal_duplicate_window_minutes,
+            within_minutes=max(self.signal_duplicate_window_minutes, 480),
         )
         if duplicate is not None:
             self.logger.info(

@@ -41,6 +41,7 @@ class BotService:
         self.cache = cache
         self.logger = get_logger("bot")
         self.local_tz = self._load_timezone(settings.timezone)
+        self.delivery_recovery_max_age = timedelta(minutes=30)
         self._consume_task: asyncio.Task | None = None
         self._daily_summary_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -269,7 +270,11 @@ class BotService:
     async def _recover_pending_deliveries(self) -> int:
         deliveries = await self.repository.list_recoverable_deliveries(limit=200)
         recovered = 0
+        cutoff = datetime.now(tz=timezone.utc) - self.delivery_recovery_max_age
         for item in deliveries:
+            if item.updated_at < cutoff:
+                await self.repository.mark_delivery(item.signal_id, item.chat_id, "expired")
+                continue
             alert = AlertMessage(
                 signal_id=item.signal_id,
                 alert_key=item.alert_key,
@@ -489,7 +494,7 @@ class BotService:
             signal.detected_at,
             limit=64,
         )
-        chart_bytes = render_signal_chart(candles, signal)
+        chart_bytes = render_signal_chart(candles, signal, timezone_name=self.settings.timezone)
         if chart_bytes is None:
             return None, None
         return chart_bytes, render_chart_caption(signal)

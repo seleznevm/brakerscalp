@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from brakerscalp.config import Settings
 from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, Direction, MarketCandle, Timeframe, UniverseSymbol, Venue
 from brakerscalp.exchanges.base import ExchangeAdapter
-from brakerscalp.services.daily_summary import classify_signal_outcome
+from brakerscalp.services.daily_summary import (
+    SetupLifecycle,
+    classify_signal_outcome,
+    evaluate_setup_lifecycle,
+    setup_group_key,
+)
 from brakerscalp.signals.charting import render_signal_chart
 from brakerscalp.signals.engine import EngineInput, RuleEngine, ScreeningResult
 from brakerscalp.signals.levels import LevelDetector
@@ -26,16 +31,18 @@ class ManualScanResult:
 @dataclass(slots=True)
 class SetupCard:
     signal: SignalRecord
-    outcome: str
+    lifecycle: SetupLifecycle
 
 
 @dataclass(slots=True)
 class TradeSimulation:
     outcome: str
+    call_at: datetime
     entry_at: datetime | None
     tp1_at: datetime | None
     tp2_at: datetime | None
     sl_at: datetime | None
+    invalidated_at: datetime | None
     exit_at: datetime | None
     exit_reason: str | None
     pnl_pct: float | None
@@ -182,18 +189,20 @@ class MarketInspector:
         signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
         cards: list[SetupCard] = []
         query = (symbol_query or "").strip().upper()
-        for signal in reversed(signals):
+        grouped_signals = self._group_signals_by_setup(signals)
+        for group in grouped_signals.values():
+            signal = group[0]
             if query and query not in signal.symbol.upper():
                 continue
             if minimum_confidence is not None and signal.confidence < minimum_confidence:
                 continue
             candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, end_at)
-            outcome = classify_signal_outcome(signal, candles)
-            if outcome_filter != "all" and outcome != outcome_filter:
+            lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=end_at)
+            if outcome_filter != "all" and lifecycle.status != outcome_filter:
                 continue
-            cards.append(SetupCard(signal=signal, outcome=outcome))
-        outcome_order = {"pending": 0, "success": 1, "failed": 2}
-        cards = sorted(cards, key=lambda item: (outcome_order.get(item.outcome, 9), -item.signal.detected_at.timestamp()))
+            cards.append(SetupCard(signal=signal, lifecycle=lifecycle))
+        outcome_order = {"watch": 0, "executed": 1, "tp1": 2, "tp2": 3, "loss": 4, "invalidation": 5}
+        cards = sorted(cards, key=lambda item: (outcome_order.get(item.lifecycle.status, 9), -item.lifecycle.call_at.timestamp()))
         return cards[:limit]
 
     async def build_statistics(
@@ -205,6 +214,7 @@ class MarketInspector:
     ) -> StatisticsSnapshot:
         signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
         query = (symbol_query or "").strip().upper()
+        grouped_signals = self._group_signals_by_setup(signals)
         by_symbol: dict[str, dict[str, float]] = defaultdict(
             lambda: {
                 "total": 0,
@@ -217,7 +227,8 @@ class MarketInspector:
             }
         )
 
-        for signal in signals:
+        for group in grouped_signals.values():
+            signal = group[0]
             if query and query not in signal.symbol.upper():
                 continue
             candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, end_at)
@@ -305,7 +316,7 @@ class MarketInspector:
         before = await self.repository.get_candles_before(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, limit=2)
         after = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, analysis_end)
         candles = sorted({item.close_time: item for item in [*before, *after]}.values(), key=lambda item: item.close_time)
-        return self._simulate_trade(signal, candles)
+        return self._simulate_trade(signal, candles, analysis_end)
 
     async def discover_symbol_venues(self, raw_symbol: str) -> tuple[str, list[VenueProbe]]:
         symbol = self.normalize_symbol(raw_symbol)
@@ -331,99 +342,29 @@ class MarketInspector:
         if len(candles) < 5:
             return None
         signal = self._chart_signal_for_report(scan.report)
-        return render_signal_chart(candles, signal)
+        return render_signal_chart(candles, signal, timezone_name=self.settings.timezone)
 
     async def render_signal_chart(self, decision_id: str) -> bytes | None:
         signal = await self.repository.get_signal_by_decision_id(decision_id)
         if signal is None:
             return None
         candles = await self.repository.get_candles_before(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, limit=64)
-        return render_signal_chart(candles, signal)
+        return render_signal_chart(candles, signal, timezone_name=self.settings.timezone)
 
-    def _simulate_trade(self, signal: SignalRecord, candles: list[CandleRecord]) -> TradeSimulation:
-        timeframe_delta = self._timeframe_delta(signal.timeframe)
-        entry_threshold = signal.detected_at - timeframe_delta
-        entry_index: int | None = None
-        entry_at: datetime | None = None
-        for index, candle in enumerate(candles):
-            if candle.close_time < entry_threshold:
-                continue
-            if signal.direction == "long" and candle.close >= signal.entry_price:
-                entry_index = index
-                entry_at = candle.close_time
-                break
-            if signal.direction == "short" and candle.close <= signal.entry_price:
-                entry_index = index
-                entry_at = candle.close_time
-                break
-
-        if entry_index is None or entry_at is None:
-            return TradeSimulation(
-                outcome="not_entered",
-                entry_at=None,
-                tp1_at=None,
-                tp2_at=None,
-                sl_at=None,
-                exit_at=None,
-                exit_reason=None,
-                pnl_pct=None,
-                duration_seconds=None,
-            )
-
-        tp1 = float(signal.targets[0]) if signal.targets else float(signal.entry_price)
-        tp2 = float(signal.targets[1]) if len(signal.targets) > 1 else tp1
-        tp1_at: datetime | None = None
-        tp2_at: datetime | None = None
-        sl_at: datetime | None = None
-
-        for candle in candles[entry_index + 1 :]:
-            if signal.direction == "long":
-                if tp1_at is None and candle.high >= tp1:
-                    tp1_at = candle.close_time
-                if tp2_at is None and candle.high >= tp2:
-                    tp2_at = candle.close_time
-                if sl_at is None and candle.low <= signal.invalidation_price:
-                    sl_at = candle.close_time
-            else:
-                if tp1_at is None and candle.low <= tp1:
-                    tp1_at = candle.close_time
-                if tp2_at is None and candle.low <= tp2:
-                    tp2_at = candle.close_time
-                if sl_at is None and candle.high >= signal.invalidation_price:
-                    sl_at = candle.close_time
-
-        exit_reason: str | None = None
-        exit_at: datetime | None = None
-        exit_price: float | None = None
-        outcome = "pending"
-        if tp2_at is not None and (sl_at is None or tp2_at < sl_at):
-            exit_reason = "TP2"
-            exit_at = tp2_at
-            exit_price = tp2
-            outcome = "success"
-        elif tp1_at is not None and (sl_at is None or tp1_at < sl_at):
-            exit_reason = "TP1"
-            exit_at = tp1_at
-            exit_price = tp1
-            outcome = "success"
-        elif sl_at is not None:
-            exit_reason = "SL"
-            exit_at = sl_at
-            exit_price = float(signal.invalidation_price)
-            outcome = "failed"
-
-        pnl_pct = self._pnl_percent(signal.direction, float(signal.entry_price), exit_price) if exit_price is not None else None
-        duration_seconds = int((exit_at - entry_at).total_seconds()) if exit_at is not None else None
+    def _simulate_trade(self, signal: SignalRecord, candles: list[CandleRecord], analysis_end: datetime) -> TradeSimulation:
+        lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=analysis_end)
         return TradeSimulation(
-            outcome=outcome,
-            entry_at=entry_at,
-            tp1_at=tp1_at,
-            tp2_at=tp2_at,
-            sl_at=sl_at,
-            exit_at=exit_at,
-            exit_reason=exit_reason,
-            pnl_pct=pnl_pct,
-            duration_seconds=duration_seconds,
+            outcome=lifecycle.status,
+            call_at=lifecycle.call_at,
+            entry_at=lifecycle.entry_at,
+            tp1_at=lifecycle.tp1_at,
+            tp2_at=lifecycle.tp2_at,
+            sl_at=lifecycle.sl_at,
+            invalidated_at=lifecycle.invalidated_at,
+            exit_at=lifecycle.exit_at,
+            exit_reason=lifecycle.exit_reason,
+            pnl_pct=lifecycle.pnl_pct,
+            duration_seconds=lifecycle.duration_seconds,
         )
 
     async def _manual_chart_candles(self, symbol: str) -> list[MarketCandle] | list[CandleRecord]:
@@ -431,13 +372,13 @@ class MarketInspector:
         if universe_item is not None:
             payload = await self._load_cached_payload(universe_item)
             if payload is not None:
-                return payload.candles_15m[-64:]
+                return payload.candles_5m[-64:]
         scan = await self.manual_scan(symbol)
         if scan.report is None:
             return []
         for venue, adapter in self.adapters.items():
             try:
-                candles = await adapter.fetch_recent_candles(symbol, Timeframe.M15, 120)
+                candles = await adapter.fetch_recent_candles(symbol, Timeframe.M5, 120)
                 return candles[-64:]
             except Exception:
                 continue
@@ -448,11 +389,11 @@ class MarketInspector:
         if direction == Direction.LONG:
             invalidation = (report.level_lower or report.last_price) - report.atr_15m * 0.15
             risk = max(report.last_price - invalidation, report.atr_15m * 0.22)
-            targets = [report.last_price + risk * 1.2, report.last_price + risk * 2.0]
+            targets = [report.last_price + risk * 2.0, report.last_price + risk * 3.0]
         else:
             invalidation = (report.level_upper or report.last_price) + report.atr_15m * 0.15
             risk = max(invalidation - report.last_price, report.atr_15m * 0.22)
-            targets = [report.last_price - risk * 1.2, report.last_price - risk * 2.0]
+            targets = [report.last_price - risk * 2.0, report.last_price - risk * 3.0]
         return ChartSignalSnapshot(
             symbol=report.symbol,
             entry_price=report.last_price,
@@ -461,7 +402,7 @@ class MarketInspector:
             render_context={
                 "level_lower": report.level_lower,
                 "level_upper": report.level_upper,
-                "chart_timeframe": Timeframe.M15.value,
+                "chart_timeframe": Timeframe.M5.value,
             },
         )
 
@@ -528,6 +469,14 @@ class MarketInspector:
     def _parse_model_list(self, raw: list[dict], model):
         return [model.model_validate(item) for item in raw]
 
+    def _group_signals_by_setup(self, signals: list[SignalRecord]) -> dict[str, list[SignalRecord]]:
+        grouped: dict[str, list[SignalRecord]] = defaultdict(list)
+        for signal in signals:
+            grouped[setup_group_key(signal)].append(signal)
+        for items in grouped.values():
+            items.sort(key=lambda item: item.detected_at)
+        return grouped
+
     def _sort_screening_result(self, item: ScreeningResult) -> tuple[int, float, int]:
         order = {
             "actionable": 0,
@@ -539,19 +488,3 @@ class MarketInspector:
             "insufficient": 6,
         }
         return (order.get(item.status, 9), -item.confidence, -int(item.updated_at.timestamp()))
-
-    def _timeframe_delta(self, timeframe: str) -> timedelta:
-        mapping = {
-            "5m": timedelta(minutes=5),
-            "15m": timedelta(minutes=15),
-            "1h": timedelta(hours=1),
-            "4h": timedelta(hours=4),
-        }
-        return mapping.get(timeframe, timedelta(minutes=15))
-
-    def _pnl_percent(self, direction: str, entry_price: float, exit_price: float | None) -> float | None:
-        if exit_price is None or not entry_price:
-            return None
-        if direction == "short":
-            return ((entry_price - exit_price) / entry_price) * 100.0
-        return ((exit_price - entry_price) / entry_price) * 100.0
