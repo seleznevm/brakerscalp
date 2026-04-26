@@ -14,7 +14,7 @@ from brakerscalp.services.daily_summary import (
     setup_group_key,
 )
 from brakerscalp.signals.charting import render_signal_chart
-from brakerscalp.signals.engine import EngineInput, RuleEngine, ScreeningResult
+from brakerscalp.signals.engine import EngineInput, RuleEngine, ScreeningResult, StrategyRuntimeConfig
 from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.models import CandleRecord, SignalRecord
@@ -111,7 +111,8 @@ class MarketInspector:
         self.universe = universe
         self.adapters = adapters
         self.level_detector = LevelDetector()
-        self.rule_engine = RuleEngine()
+        self.strategy_defaults = settings.default_strategy_config()
+        self.rule_engine = RuleEngine(StrategyRuntimeConfig.model_validate(self.strategy_defaults))
 
     def normalize_symbol(self, raw_symbol: str) -> str:
         symbol = raw_symbol.strip().upper()
@@ -138,6 +139,7 @@ class MarketInspector:
         return [item for item in self.universe if item.primary_venue in allowed_venues]
 
     async def screen_universe(self, scope: str = "active") -> list[ScreeningResult]:
+        self.rule_engine.configure(await self._runtime_strategy_config())
         results: list[ScreeningResult] = []
         for item in await self.list_universe():
             payload = await self._load_cached_payload(item)
@@ -156,6 +158,7 @@ class MarketInspector:
         return sorted(results, key=self._sort_screening_result)
 
     async def manual_scan(self, raw_symbol: str) -> ManualScanResult:
+        self.rule_engine.configure(await self._runtime_strategy_config())
         symbol = self.normalize_symbol(raw_symbol)
         if not symbol:
             return ManualScanResult(source="none", report=None, errors=["Символ не указан."])
@@ -488,3 +491,10 @@ class MarketInspector:
             "insufficient": 6,
         }
         return (order.get(item.status, 9), -item.confidence, -int(item.updated_at.timestamp()))
+
+    async def _runtime_strategy_config(self) -> StrategyRuntimeConfig:
+        if hasattr(self.cache, "get_strategy_config"):
+            return StrategyRuntimeConfig.model_validate(
+                await self.cache.get_strategy_config(default=self.strategy_defaults)
+            )
+        return StrategyRuntimeConfig.model_validate(self.strategy_defaults)

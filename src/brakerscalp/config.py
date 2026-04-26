@@ -44,6 +44,20 @@ class Settings(BaseSettings):
     signal_duplicate_window_minutes: int = 180
     minimum_alert_confidence: float = 65.0
     risk_usdt: float = 25.0
+    strategy_timeframe: str = "5m"
+    strategy_minimum_expected_rr: float = 2.0
+    strategy_actionable_confidence_threshold: float = 88.0
+    strategy_watchlist_confidence_threshold: float = 82.0
+    strategy_volume_z_threshold: float = 1.80
+    strategy_watchlist_volume_z_threshold: float = 1.05
+    strategy_min_touches: int = 3
+    strategy_squeeze_threshold: float = 0.72
+    strategy_dist_to_level_atr: float = 0.35
+    strategy_breakout_distance_atr: float = 0.18
+    strategy_body_ratio_threshold: float = 0.58
+    strategy_close_to_extreme_threshold: float = 0.22
+    strategy_range_expansion_threshold: float = 1.25
+    strategy_sl_multiplier: float = 0.22
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     exchange_request_timeout_seconds: float = 10.0
@@ -116,6 +130,24 @@ class Settings(BaseSettings):
         if self.enable_okx:
             venues.append("okx")
         return venues
+
+    def default_strategy_config(self) -> dict[str, object]:
+        return {
+            "timeframe": self.strategy_timeframe,
+            "minimum_expected_rr": self.strategy_minimum_expected_rr,
+            "actionable_confidence_threshold": self.strategy_actionable_confidence_threshold,
+            "watchlist_confidence_threshold": self.strategy_watchlist_confidence_threshold,
+            "volume_z_threshold": self.strategy_volume_z_threshold,
+            "watchlist_volume_z_threshold": self.strategy_watchlist_volume_z_threshold,
+            "min_touches": self.strategy_min_touches,
+            "squeeze_threshold": self.strategy_squeeze_threshold,
+            "dist_to_level_atr": self.strategy_dist_to_level_atr,
+            "breakout_distance_atr": self.strategy_breakout_distance_atr,
+            "body_ratio_threshold": self.strategy_body_ratio_threshold,
+            "close_to_extreme_threshold": self.strategy_close_to_extreme_threshold,
+            "range_expansion_threshold": self.strategy_range_expansion_threshold,
+            "sl_multiplier": self.strategy_sl_multiplier,
+        }
 
 
 @lru_cache(maxsize=1)

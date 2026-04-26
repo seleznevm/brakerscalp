@@ -7,7 +7,7 @@ from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContex
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import ALERTS_TOTAL, SIGNALS_IN_DB, STALE_DATA_RATIO
 from brakerscalp.serialization import loads
-from brakerscalp.signals.engine import EngineInput, RuleEngine
+from brakerscalp.signals.engine import EngineInput, RuleEngine, StrategyRuntimeConfig
 from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.signals.rendering import to_alert_message
 from brakerscalp.storage.cache import StateCache
@@ -30,6 +30,7 @@ class EngineService:
         alert_message_thread_id: int | None = None,
         signal_duplicate_window_minutes: int = 180,
         minimum_alert_confidence: float = 65.0,
+        strategy_defaults: dict[str, object] | None = None,
     ) -> None:
         self.repository = repository
         self.cache = cache
@@ -40,8 +41,9 @@ class EngineService:
         self.alert_message_thread_id = alert_message_thread_id
         self.signal_duplicate_window_minutes = signal_duplicate_window_minutes
         self.minimum_alert_confidence = minimum_alert_confidence
+        self.strategy_defaults = strategy_defaults or StrategyRuntimeConfig().model_dump(mode="json")
         self.level_detector = LevelDetector()
-        self.rule_engine = RuleEngine()
+        self.rule_engine = RuleEngine(StrategyRuntimeConfig.model_validate(self.strategy_defaults))
         self.logger = get_logger("engine")
 
     async def run(self) -> None:
@@ -58,6 +60,8 @@ class EngineService:
         detected = 0
         runtime_universe = await self._current_universe()
         runtime_minimum_alert_confidence = await self._runtime_minimum_alert_confidence()
+        runtime_strategy_config = await self._runtime_strategy_config()
+        self.rule_engine.configure(runtime_strategy_config)
         for item in runtime_universe:
             total += 1
             stale, has_signal = await self._process_symbol(item, runtime_minimum_alert_confidence)
@@ -78,6 +82,7 @@ class EngineService:
                     "detected_signals": detected,
                     "signals_in_db": signal_count,
                     "minimum_alert_confidence": runtime_minimum_alert_confidence,
+                    "strategy_timeframe": runtime_strategy_config.timeframe.value,
                 },
             )
 
@@ -130,6 +135,7 @@ class EngineService:
             direction=decision.direction.value,
             level_id=decision.level_id,
             within_minutes=max(self.signal_duplicate_window_minutes, 480),
+            setup_stage=str(decision.render_context.get("setup_stage", "")),
         )
         if duplicate is not None:
             self.logger.info(
@@ -166,6 +172,13 @@ class EngineService:
         if hasattr(self.cache, "get_minimum_alert_confidence"):
             return await self.cache.get_minimum_alert_confidence(self.minimum_alert_confidence)
         return self.minimum_alert_confidence
+
+    async def _runtime_strategy_config(self) -> StrategyRuntimeConfig:
+        if hasattr(self.cache, "get_strategy_config"):
+            return StrategyRuntimeConfig.model_validate(
+                await self.cache.get_strategy_config(default=self.strategy_defaults)
+            )
+        return StrategyRuntimeConfig.model_validate(self.strategy_defaults)
 
     async def _current_universe(self) -> list[UniverseSymbol]:
         allowed_venues = {item.primary_venue for item in self.universe}

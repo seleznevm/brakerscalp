@@ -18,6 +18,7 @@ async def amain() -> None:
         alert_message_thread_id=settings.alert_message_thread_id,
         signal_duplicate_window_minutes=settings.signal_duplicate_window_minutes,
         minimum_alert_confidence=settings.minimum_alert_confidence,
+        strategy_defaults=settings.default_strategy_config(),
     )
     try:
         await service.run()

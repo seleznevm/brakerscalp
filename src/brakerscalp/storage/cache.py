@@ -130,6 +130,18 @@ class StateCache:
         except (TypeError, ValueError):
             return float(default)
 
+    async def set_strategy_config(self, value: dict[str, Any]) -> None:
+        await self.set_json(self._key("runtime", "strategy-config"), value)
+
+    async def get_strategy_config(self, default: dict[str, Any]) -> dict[str, Any]:
+        raw = await self.get_json(self._key("runtime", "strategy-config"))
+        if not isinstance(raw, dict):
+            return dict(default)
+        return {**default, **raw}
+
+    async def reset_strategy_config(self) -> None:
+        await self.redis.delete(self._key("runtime", "strategy-config"))
+
     async def store_universe(self, symbols: list[UniverseSymbol]) -> None:
         await self.set_json(
             self._key("runtime", "universe"),

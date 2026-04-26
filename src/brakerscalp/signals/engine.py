@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from pydantic import BaseModel
+
 from brakerscalp.domain.models import (
     BookSnapshot,
     DataHealth,
@@ -19,6 +21,23 @@ from brakerscalp.domain.models import (
     Venue,
 )
 from brakerscalp.signals.indicators import average_true_range, median_spread, simple_moving_average, volume_zscore
+
+
+class StrategyRuntimeConfig(BaseModel):
+    timeframe: Timeframe = Timeframe.M5
+    minimum_expected_rr: float = 2.0
+    actionable_confidence_threshold: float = 88.0
+    watchlist_confidence_threshold: float = 82.0
+    volume_z_threshold: float = 1.80
+    watchlist_volume_z_threshold: float = 1.05
+    min_touches: int = 3
+    squeeze_threshold: float = 0.72
+    dist_to_level_atr: float = 0.35
+    breakout_distance_atr: float = 0.18
+    body_ratio_threshold: float = 0.58
+    close_to_extreme_threshold: float = 0.22
+    range_expansion_threshold: float = 1.25
+    sl_multiplier: float = 0.22
 
 
 @dataclass(slots=True)
@@ -133,6 +152,14 @@ class RuleEngine:
     }
     minimum_expected_rr = 2.0
 
+    def __init__(self, strategy: StrategyRuntimeConfig | None = None) -> None:
+        self.strategy = strategy or StrategyRuntimeConfig()
+        self.minimum_expected_rr = self.strategy.minimum_expected_rr
+
+    def configure(self, strategy: StrategyRuntimeConfig) -> None:
+        self.strategy = strategy
+        self.minimum_expected_rr = strategy.minimum_expected_rr
+
     def evaluate(self, payload: EngineInput) -> SignalDecision | None:
         return self.inspect(payload).decision
 
@@ -144,7 +171,16 @@ class RuleEngine:
                 notes=["Недостаточно истории свечей или уровней для оценки сетапа."],
             )
 
-        current = payload.candles_5m[-1]
+        execution_timeframe = self.strategy.timeframe
+        execution_candles = payload.candles_5m if execution_timeframe == Timeframe.M5 else payload.candles_15m
+        if len(execution_candles) < 40:
+            return self._empty_result(
+                payload=payload,
+                status="insufficient",
+                notes=["Недостаточно свечей на execution-timeframe для оценки пробоя."],
+            )
+
+        current = execution_candles[-1]
         atr_5m = average_true_range(payload.candles_5m[-40:] or payload.candles_5m, period=14)
         atr_15m = average_true_range(payload.candles_15m[-30:] or payload.candles_15m, period=14)
         atr_1h = average_true_range(payload.candles_1h[-40:] or payload.candles_1h, period=14)
@@ -152,32 +188,33 @@ class RuleEngine:
             return self._empty_result(
                 payload=payload,
                 status="insufficient",
-                notes=["ATR не рассчитался, сетап пропущен."],
+                notes=["ATR не рассчитан, сигнал пропускается."],
             )
 
+        execution_atr = atr_5m if execution_timeframe == Timeframe.M5 else atr_15m
         trend = self._trend_state(payload.candles_1h, payload.candles_4h)
         coin = self._coin_in_play(payload.candles_15m, payload.candles_1h)
-        candidates = self._candidate_levels(current, payload.levels, max(atr_5m, atr_15m * 0.35))
+        candidates = self._candidate_levels(current, payload.levels, max(execution_atr, atr_15m * 0.35))
         if not candidates:
             return self._empty_result(
                 payload=payload,
                 status="cold",
-                atr_15m=atr_5m,
+                atr_15m=execution_atr,
                 trend=trend,
                 coin=coin,
-                notes=["Рядом с текущей ценой нет рабочего HTF уровня для breakout scalp."],
+                notes=["Цена слишком далеко от значимых HTF уровней для breakout scalp."],
             )
 
         best_bundle: tuple[float, LevelCandidate, Direction, StructureState, BreakoutState, float, list[ScoreContribution], SignalDecision | None] | None = None
         for level in candidates[:8]:
-            direction = self._breakout_direction(current, level, atr_5m) or self._default_direction(level)
+            direction = self._breakout_direction(current, level, execution_atr) or self._default_direction(level)
             structure = self._structure_state(payload.candles_15m, payload.candles_1h, level, atr_15m, direction)
             breakout = self._breakout_state(
                 current=current,
-                candles_15m=payload.candles_15m,
+                execution_candles=execution_candles,
                 candles_5m=payload.candles_5m,
                 level=level,
-                atr_15m=atr_5m,
+                atr_execution=execution_atr,
                 direction=direction,
                 book=payload.book,
                 health=payload.health,
@@ -190,7 +227,7 @@ class RuleEngine:
                     payload=payload,
                     level=level,
                     current=current,
-                    atr_15m=atr_15m,
+                    atr_15m=execution_atr,
                     direction=direction,
                     trend=trend,
                     coin=coin,
@@ -205,7 +242,7 @@ class RuleEngine:
                     payload=payload,
                     level=level,
                     current=current,
-                    atr_15m=atr_15m,
+                    atr_15m=execution_atr,
                     direction=direction,
                     trend=trend,
                     coin=coin,
@@ -223,10 +260,10 @@ class RuleEngine:
             return self._empty_result(
                 payload=payload,
                 status="cold",
-                atr_15m=atr_15m,
+                atr_15m=execution_atr,
                 trend=trend,
                 coin=coin,
-                notes=["Подходящий уровень найден, но он не прошел внутренний ранжир."],
+                notes=["Подходящий сильный сетап не найден в текущем рыночном окне."],
             )
 
         _, level, direction, structure, breakout, confidence, _, decision = best_bundle
@@ -434,8 +471,13 @@ class RuleEngine:
             near_level_atr = (min(lows) - level.lower_price) / max(atr_15m, 1e-9)
             contained = all(item.close >= level.lower_price - atr_15m * 0.18 for item in pre_break_window)
 
-        valid = contained and -0.35 <= near_level_atr <= 0.90 and consolidation_range_atr <= 3.4 and squeeze_score >= 0.33
-        if level.source.startswith("cascade") and max(cascade_touches, level.touches) < 2:
+        valid = (
+            contained
+            and -0.35 <= near_level_atr <= 0.90
+            and consolidation_range_atr <= 3.4
+            and squeeze_score >= min(self.strategy.squeeze_threshold * 0.45, 0.60)
+        )
+        if level.source.startswith("cascade") and max(cascade_touches, level.touches) < max(self.strategy.min_touches - 1, 2):
             valid = False
 
         source_bonus = 0.20 if level.source.startswith("cascade") else 0.14 if level.source.startswith("prev-") else 0.10
@@ -459,10 +501,10 @@ class RuleEngine:
         self,
         *,
         current: MarketCandle,
-        candles_15m: list[MarketCandle],
+        execution_candles: list[MarketCandle],
         candles_5m: list[MarketCandle],
         level: LevelCandidate,
-        atr_15m: float,
+        atr_execution: float,
         direction: Direction,
         book: BookSnapshot | None,
         health: DataHealth,
@@ -470,9 +512,9 @@ class RuleEngine:
     ) -> BreakoutState:
         candle_range = max(current.high - current.low, 1e-9)
         body_ratio = abs(current.close - current.open) / candle_range
-        recent_ranges = [item.high - item.low for item in candles_5m[-25:-1]]
+        recent_ranges = [item.high - item.low for item in execution_candles[-25:-1]]
         range_expansion = candle_range / max(median_spread(recent_ranges), 1e-9)
-        volume_z = volume_zscore(candles_5m[-40:], period=30)
+        volume_z = volume_zscore(execution_candles[-40:], period=30)
         book_imbalance = self._book_imbalance(book)
         spread_ratio = health.spread_ratio
         fresh_cross = [item for item in cross_venue_health if item.venue != health.venue and item.is_fresh]
@@ -480,22 +522,22 @@ class RuleEngine:
         data_ok = health.is_fresh and not health.has_sequence_gap and spread_ratio <= 3.5
 
         if direction == Direction.LONG:
-            breakout_distance_atr = (current.close - level.upper_price) / max(atr_15m, 1e-9)
+            breakout_distance_atr = (current.close - level.upper_price) / max(atr_execution, 1e-9)
             close_to_extreme = (current.high - current.close) / candle_range
             book_support = book_imbalance >= -0.22
         else:
-            breakout_distance_atr = (level.lower_price - current.close) / max(atr_15m, 1e-9)
+            breakout_distance_atr = (level.lower_price - current.close) / max(atr_execution, 1e-9)
             close_to_extreme = (current.close - current.low) / candle_range
             book_support = book_imbalance <= 0.22
 
         follow_through_5m = self._follow_through_5m(candles_5m[-3:], level, direction)
         signal_ready = (
             data_ok
-            and breakout_distance_atr >= 0.18
-            and body_ratio >= 0.58
-            and close_to_extreme <= 0.22
-            and volume_z >= 1.80
-            and range_expansion >= 1.25
+            and breakout_distance_atr >= self.strategy.breakout_distance_atr
+            and body_ratio >= self.strategy.body_ratio_threshold
+            and close_to_extreme <= self.strategy.close_to_extreme_threshold
+            and volume_z >= self.strategy.volume_z_threshold
+            and range_expansion >= self.strategy.range_expansion_threshold
             and follow_through_5m
             and book_support
             and cross_ok
@@ -574,7 +616,7 @@ class RuleEngine:
         signal_class = self._classify(confidence) if confirmed_breakout else SignalClass.WATCHLIST
         if confirmed_breakout and signal_class == SignalClass.SUPPRESSED:
             return None
-        if not confirmed_breakout and confidence < 82:
+        if not confirmed_breakout and confidence < self.strategy.watchlist_confidence_threshold:
             return None
 
         if confirmed_breakout:
@@ -587,7 +629,7 @@ class RuleEngine:
             invalidation = min(structure.anchor_price - atr_15m * 0.10, level.lower_price - atr_15m * 0.15)
         else:
             invalidation = max(structure.anchor_price + atr_15m * 0.10, level.upper_price + atr_15m * 0.15)
-        risk = max(abs(entry_price - invalidation), atr_15m * 0.22)
+        risk = max(abs(entry_price - invalidation), atr_15m * self.strategy.sl_multiplier)
         targets = self._project_targets(payload.levels, level, direction, entry_price, risk)
         if targets is None:
             return None
@@ -595,17 +637,17 @@ class RuleEngine:
         expected_rr = abs((t1 - entry_price) / risk)
         if expected_rr < self.minimum_expected_rr:
             return None
-        stage = "confirmed" if confirmed_breakout else "watch"
-        alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{Timeframe.M5.value}:{level.detected_at.date().isoformat()}"
+        stage = "activated" if confirmed_breakout else "watch"
+        alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{self.strategy.timeframe.value}:{stage}:{level.detected_at.date().isoformat()}"
 
         why_not_higher: list[str] = []
         if not confirmed_breakout:
-            why_not_higher.append("Пробой еще не подтвержден закрытием 15m за уровнем.")
+            why_not_higher.append("Пробой еще не подтвержден закрытием 5m свечи за уровнем.")
         if trend.bias != direction:
             why_not_higher.append("Текущий HTF тренд не полностью синхронизирован с направлением пробоя.")
-        if structure.cascade_touches < 3:
+        if structure.cascade_touches < self.strategy.min_touches:
             why_not_higher.append(f"Каскад еще неглубокий: подтверждено только {structure.cascade_touches} касания.")
-        if structure.squeeze_score < 0.70:
+        if structure.squeeze_score < self.strategy.squeeze_threshold:
             why_not_higher.append(f"Поджатие есть, но не максимальное: squeeze score {structure.squeeze_score:.2f}.")
         if coin.volume_z_15m < 1.40:
             why_not_higher.append(f"Объем выше фона, но без экстремума: z-score {coin.volume_z_15m:.2f}.")
@@ -644,7 +686,7 @@ class RuleEngine:
             "trigger": self._trigger_text(direction, current, level, breakout.breakout_distance_atr, confirmed_breakout, entry_price),
             "stop_logic": self._stop_logic(direction, invalidation, structure.anchor_price, level),
             "cancel_if": (
-                "15m вернулась в диапазон под уровень / данные устарели / спред резко расширился"
+                "5m закрытие вернулось под уровень / данные устарели / спред резко расширился"
                 if confirmed_breakout
                 else "цена ушла от уровня и поджатие распалось / данные устарели / спред резко расширился"
             ),
@@ -656,7 +698,7 @@ class RuleEngine:
             "tp1": round(t1, 6),
             "tp2": round(t2, 6),
             "minimum_expected_rr": self.minimum_expected_rr,
-            "chart_timeframe": Timeframe.M5.value,
+            "chart_timeframe": self.strategy.timeframe.value,
             "setup_stage": stage,
             "trend_bias": trend.bias.value if trend.bias else None,
             "cascade_touches": structure.cascade_touches,
@@ -666,7 +708,7 @@ class RuleEngine:
         return SignalDecision(
             symbol=payload.symbol,
             venue=payload.venue,
-            timeframe=Timeframe.M5,
+            timeframe=self.strategy.timeframe,
             setup=SetupType.BREAKOUT,
             direction=direction,
             signal_class=signal_class,
@@ -813,9 +855,9 @@ class RuleEngine:
         entry_price: float,
     ) -> str:
         if direction == Direction.LONG and confirmed_breakout:
-            return f"15m закрылась выше зоны сопротивления на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
+            return f"5m закрытие выше зоны сопротивления на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
         if direction == Direction.SHORT and confirmed_breakout:
-            return f"15m закрылась ниже зоны поддержки на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
+            return f"5m закрытие ниже зоны поддержки на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
         if direction == Direction.LONG:
             return f"Цена стоит под сопротивлением. Для входа нужен 5m close выше {entry_price:.4f}."
         return f"Цена стоит над поддержкой. Для входа нужен 5m close ниже {entry_price:.4f}."
@@ -856,15 +898,15 @@ class RuleEngine:
     ) -> bool:
         return (
             breakout.data_ok
-            and confidence >= 82
+            and confidence >= self.strategy.watchlist_confidence_threshold
             and breakout.breakout_distance_atr >= -0.22
             and structure.score >= 0.72
-            and structure.cascade_touches >= 3
-            and structure.squeeze_score >= 0.72
-            and structure.near_level_atr <= 0.35
+            and structure.cascade_touches >= self.strategy.min_touches
+            and structure.squeeze_score >= self.strategy.squeeze_threshold
+            and structure.near_level_atr <= self.strategy.dist_to_level_atr
             and coin.is_active
             and coin.score >= 0.58
-            and breakout.volume_z >= 1.05
+            and breakout.volume_z >= self.strategy.watchlist_volume_z_threshold
             and level.kind in {LevelKind.RESISTANCE, LevelKind.SUPPORT}
         )
 
@@ -910,8 +952,8 @@ class RuleEngine:
         return notes
 
     def _classify(self, confidence: float) -> SignalClass:
-        if confidence >= 88:
+        if confidence >= self.strategy.actionable_confidence_threshold:
             return SignalClass.ACTIONABLE
-        if confidence >= 80:
+        if confidence >= self.strategy.watchlist_confidence_threshold:
             return SignalClass.WATCHLIST
         return SignalClass.SUPPRESSED

@@ -17,6 +17,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from brakerscalp.config import Settings
 from brakerscalp.domain.models import UniverseSymbol, Venue
 from brakerscalp.services.market_inspector import ManualScanResult, MarketInspector
+from brakerscalp.signals.engine import StrategyRuntimeConfig
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.repository import Repository
 from brakerscalp.universe import save_universe
@@ -90,6 +91,7 @@ def build_api(
         actionable_24h, watchlist_24h = await _signal_stats(repository)
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         risk_usdt = await _current_risk_usdt(cache, settings)
+        strategy_config = await _current_strategy_config(cache, settings)
         cards = "".join(
             [
                 _metric_card("Сигналов в базе", str(signal_count), "Всего сохраненных решений."),
@@ -182,14 +184,15 @@ def build_api(
         limit: int = Query(default=24, ge=1, le=100),
         status: str = Query(default="all"),
         q: str = Query(default=""),
-        min_confidence: float | None = Query(default=None, ge=0.0, le=100.0),
+        min_confidence: str = Query(default=""),
     ) -> HTMLResponse:
+        parsed_min_confidence = _parse_optional_float(min_confidence, minimum=0.0, maximum=100.0)
         risk_usdt = await _current_risk_usdt(cache, settings)
         all_setups = await inspector.list_active_setups(
             limit=250,
             outcome_filter="all",
             symbol_query=q,
-            minimum_confidence=min_confidence,
+            minimum_confidence=parsed_min_confidence,
         )
         available_statuses = _available_setup_statuses(all_setups)
         selected_status = status if status == "all" or status in available_statuses else "all"
@@ -206,7 +209,7 @@ def build_api(
             <p class="hero-copy">Последние actionable и watchlist сигналы с графиками, точкой входа, SL, TP и статусом отработки.</p>
           </div>
         </section>
-        <section class="panel">{_setups_filter_form(status=selected_status, symbol_query=q, limit=limit, min_confidence=min_confidence, available_statuses=available_statuses)}</section>
+        <section class="panel">{_setups_filter_form(status=selected_status, symbol_query=q, limit=limit, min_confidence=parsed_min_confidence, available_statuses=available_statuses)}</section>
         <section class="setup-grid large">{cards}</section>
         """
         return HTMLResponse(_page("Сетапы", "setups", body, refresh_seconds=30))
@@ -215,9 +218,12 @@ def build_api(
     async def screener_page(
         scope: str = Query(default="active", pattern="^(active|all)$"),
         limit: int = Query(default=50, ge=1, le=200),
+        sort_by: str = Query(default="score", pattern="^(symbol|status|bias|score|dist_atr|vol_z|quote_x|squeeze|touches|freshness)$"),
+        sort_dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     ) -> HTMLResponse:
         rows = await inspector.screen_universe(scope=scope)
-        table = _screener_table(rows[:limit], local_tz)
+        rows = _sort_screener_rows(rows, sort_by=sort_by, sort_dir=sort_dir)
+        table = _screener_table(rows[:limit], local_tz, scope=scope, limit=limit, sort_by=sort_by, sort_dir=sort_dir)
         body = f"""
         <section class="hero compact">
           <div>
@@ -239,12 +245,14 @@ def build_api(
         symbol: str | None = None,
         threshold_saved: int = 0,
         risk_saved: int = 0,
+        strategy_saved: str | None = None,
         manage_symbol: str | None = None,
         universe_saved: str | None = None,
     ) -> HTMLResponse:
         scan = await inspector.manual_scan(symbol) if symbol else None
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         risk_usdt = await _current_risk_usdt(cache, settings)
+        strategy_config = await _current_strategy_config(cache, settings)
         manual_card = _manual_scan_card(symbol, scan, local_tz) if symbol else _manual_scan_form("")
         runtime_universe = await inspector.list_universe()
         discovered_symbol, venue_probes = await inspector.discover_symbol_venues(manage_symbol or "") if manage_symbol else ("", [])
@@ -263,7 +271,7 @@ def build_api(
               <a href="/debug/runtime-config">JSON</a>
             </div>
             {_settings_table(settings, minimum_alert_confidence, risk_usdt)}
-            {_runtime_settings_form(minimum_alert_confidence, risk_usdt, threshold_saved=bool(threshold_saved), risk_saved=bool(risk_saved))}
+            {_runtime_settings_form(minimum_alert_confidence, risk_usdt, strategy_config, threshold_saved=bool(threshold_saved), risk_saved=bool(risk_saved), strategy_saved=strategy_saved)}
           </div>
           <div class="panel">
             <div class="panel-head">
@@ -288,6 +296,47 @@ def build_api(
     async def apply_risk(value: float = Query(ge=0.01, le=1000000.0)) -> RedirectResponse:
         await cache.set_risk_usdt(value)
         return RedirectResponse(url="/settings?risk_saved=1", status_code=303)
+
+    @app.get("/settings/apply-strategy")
+    async def apply_strategy(
+        timeframe: str = Query(default="5m", pattern="^(5m|15m)$"),
+        minimum_expected_rr: float = Query(ge=1.0, le=10.0),
+        actionable_confidence_threshold: float = Query(ge=0.0, le=100.0),
+        watchlist_confidence_threshold: float = Query(ge=0.0, le=100.0),
+        volume_z_threshold: float = Query(ge=0.0, le=20.0),
+        watchlist_volume_z_threshold: float = Query(ge=0.0, le=20.0),
+        min_touches: int = Query(ge=1, le=10),
+        squeeze_threshold: float = Query(ge=0.0, le=1.5),
+        dist_to_level_atr: float = Query(ge=0.0, le=5.0),
+        breakout_distance_atr: float = Query(ge=0.0, le=5.0),
+        body_ratio_threshold: float = Query(ge=0.0, le=1.0),
+        close_to_extreme_threshold: float = Query(ge=0.0, le=1.0),
+        range_expansion_threshold: float = Query(ge=0.0, le=10.0),
+        sl_multiplier: float = Query(ge=0.01, le=5.0),
+    ) -> RedirectResponse:
+        config = StrategyRuntimeConfig(
+            timeframe=timeframe,
+            minimum_expected_rr=minimum_expected_rr,
+            actionable_confidence_threshold=actionable_confidence_threshold,
+            watchlist_confidence_threshold=watchlist_confidence_threshold,
+            volume_z_threshold=volume_z_threshold,
+            watchlist_volume_z_threshold=watchlist_volume_z_threshold,
+            min_touches=min_touches,
+            squeeze_threshold=squeeze_threshold,
+            dist_to_level_atr=dist_to_level_atr,
+            breakout_distance_atr=breakout_distance_atr,
+            body_ratio_threshold=body_ratio_threshold,
+            close_to_extreme_threshold=close_to_extreme_threshold,
+            range_expansion_threshold=range_expansion_threshold,
+            sl_multiplier=sl_multiplier,
+        )
+        await cache.set_strategy_config(config.model_dump(mode="json"))
+        return RedirectResponse(url="/settings?strategy_saved=applied", status_code=303)
+
+    @app.get("/settings/strategy-defaults")
+    async def strategy_defaults() -> RedirectResponse:
+        await cache.set_strategy_config(settings.default_strategy_config())
+        return RedirectResponse(url="/settings?strategy_saved=defaults", status_code=303)
 
     @app.get("/settings/universe/add")
     async def add_universe_symbol(symbol: str, venue: str) -> RedirectResponse:
@@ -511,6 +560,7 @@ def build_api(
     async def debug_runtime_config() -> JSONResponse:
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         risk_usdt = await _current_risk_usdt(cache, settings)
+        strategy_config = await _current_strategy_config(cache, settings)
         return JSONResponse(
             {
                 "app_name": settings.app_name,
@@ -526,6 +576,8 @@ def build_api(
                 "runtime_minimum_alert_confidence": minimum_alert_confidence,
                 "risk_usdt": settings.risk_usdt,
                 "runtime_risk_usdt": risk_usdt,
+                "default_strategy_config": settings.default_strategy_config(),
+                "runtime_strategy_config": strategy_config.model_dump(mode="json"),
                 "exchange_book_depth": settings.exchange_book_depth,
                 "exchange_trades_limit": settings.exchange_trades_limit,
                 "universe_path": str(settings.universe_path),
@@ -561,6 +613,25 @@ async def _current_risk_usdt(cache: StateCache, settings: Settings) -> float:
     if hasattr(cache, "get_risk_usdt"):
         return await cache.get_risk_usdt(settings.risk_usdt)
     return settings.risk_usdt
+
+
+async def _current_strategy_config(cache: StateCache, settings: Settings) -> StrategyRuntimeConfig:
+    default = settings.default_strategy_config()
+    if hasattr(cache, "get_strategy_config"):
+        return StrategyRuntimeConfig.model_validate(await cache.get_strategy_config(default=default))
+    return StrategyRuntimeConfig.model_validate(default)
+
+
+def _parse_optional_float(value: str | None, *, minimum: float, maximum: float) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed < minimum or parsed > maximum:
+        return None
+    return parsed
 
 
 def _resolve_statistics_window(
@@ -1080,6 +1151,46 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       background: #0b1720;
       color: #f5fbff;
     }}
+    .strategy-form {{
+      align-items: flex-start;
+    }}
+    .field-block {{
+      display: flex;
+      flex: 1 1 220px;
+      min-width: 220px;
+      flex-direction: column;
+      gap: 8px;
+    }}
+    .field-block input,
+    .field-block select {{
+      min-width: 0;
+    }}
+    .sort-link {{
+      color: inherit;
+      text-decoration: none;
+    }}
+    .tooltip-anchor {{
+      position: relative;
+      cursor: help;
+      border-bottom: 1px dotted rgba(245, 251, 255, 0.28);
+    }}
+    .tooltip-anchor:hover::after {{
+      content: attr(data-tooltip);
+      position: absolute;
+      left: 0;
+      top: calc(100% + 8px);
+      z-index: 20;
+      width: min(260px, 60vw);
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #0b1720;
+      color: #f5fbff;
+      white-space: normal;
+      font-size: 12px;
+      line-height: 1.45;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }}
     .scan-card {{
       padding: 16px;
       border-radius: 18px;
@@ -1349,9 +1460,65 @@ def _delivery_card(item, local_tz: ZoneInfo) -> str:
     """
 
 
-def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
+SCREENER_TOOLTIPS = {
+    "bias": "HTF direction from the 1h/4h trend. LONG is stronger with an uptrend, SHORT with a downtrend.",
+    "dist_atr": "Distance from the level in ATR units. Near zero means price is close to the breakout level.",
+    "vol_z": "Volume z-score versus recent history. Above 1.0 is active; above 1.8 is a stronger impulse.",
+    "quote_x": "Current quote-volume relative to its recent baseline. Higher values mean the coin is more active now.",
+    "squeeze": "Compression score before the breakout. Higher values mean cleaner pressure into the level.",
+    "touches": "How many relevant touches the level has. More touches usually mean a more important breakout level.",
+    "freshness": "Market-state freshness in milliseconds. Lower is better.",
+}
+
+
+def _sort_screener_rows(rows: list, *, sort_by: str, sort_dir: str) -> list:
+    reverse = sort_dir == "desc"
+    status_order = {"actionable": 0, "watchlist": 1, "arming": 2, "monitor": 3, "cold": 4, "stale": 5, "insufficient": 6}
+    bias_order = {"LONG": 0, "SHORT": 1, None: 2}
+
+    def key(item):
+        if sort_by == "symbol":
+            return item.symbol
+        if sort_by == "status":
+            return status_order.get(item.status, 99)
+        if sort_by == "bias":
+            return bias_order.get(item.direction.value.upper() if item.direction else None, 99)
+        if sort_by == "score":
+            return float(item.confidence)
+        if sort_by == "dist_atr":
+            return float(item.breakout_distance_atr)
+        if sort_by == "vol_z":
+            return float(item.volume_z_15m)
+        if sort_by == "quote_x":
+            return float(item.quote_activity_ratio)
+        if sort_by == "squeeze":
+            return float(item.squeeze_score)
+        if sort_by == "touches":
+            return int(item.cascade_touches)
+        if sort_by == "freshness":
+            return int(item.freshness_ms)
+        return float(item.confidence)
+
+    return sorted(rows, key=key, reverse=reverse)
+
+
+def _screener_sort_href(*, scope: str, limit: int, sort_by: str, sort_dir: str) -> str:
+    return f"/screener?scope={quote_plus(scope)}&limit={limit}&sort_by={quote_plus(sort_by)}&sort_dir={quote_plus(sort_dir)}"
+
+
+def _screener_header(label: str, key: str, *, scope: str, limit: int, current_sort_by: str, current_sort_dir: str, tooltip: str | None = None) -> str:
+    next_dir = "asc" if current_sort_by != key or current_sort_dir == "desc" else "desc"
+    arrow = " ^" if current_sort_by == key and current_sort_dir == "asc" else " v" if current_sort_by == key else ""
+    text = escape(label) + arrow
+    if tooltip:
+        text = f'<span class="tooltip-anchor" data-tooltip="{escape(tooltip)}">{text}</span>'
+    href = _screener_sort_href(scope=scope, limit=limit, sort_by=key, sort_dir=next_dir)
+    return f'<a class="sort-link" href="{href}">{text}</a>'
+
+
+def _screener_table(rows: list, local_tz: ZoneInfo, *, scope: str, limit: int, sort_by: str, sort_dir: str) -> str:
     if not rows:
-        return _empty_block("Скринер пока пуст.")
+        return _empty_block("Screener is empty.")
     rendered_rows = []
     for item in rows:
         level = f"{item.level_lower:.4f} - {item.level_upper:.4f}" if item.level_lower is not None and item.level_upper is not None else "n/a"
@@ -1381,20 +1548,20 @@ def _screener_table(rows: list, local_tz: ZoneInfo) -> str:
       <table>
         <thead>
           <tr>
-            <th>Монета</th>
-            <th>Статус</th>
-            <th>Bias</th>
-            <th>Score</th>
+            <th>{_screener_header("Монета", "symbol", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_screener_header("Статус", "status", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
+            <th>{_screener_header("BIAS", "bias", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["bias"])}</th>
+            <th>{_screener_header("SCORE", "score", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir)}</th>
             <th>Last</th>
             <th>Уровень</th>
-            <th>Dist ATR</th>
-            <th>Vol z</th>
-            <th>Quote x</th>
-            <th>Squeeze</th>
-            <th>Touches</th>
-            <th>Freshness</th>
-            <th>Примечание</th>
-            <th>Обновлено</th>
+            <th>{_screener_header("DIST ATR", "dist_atr", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["dist_atr"])}</th>
+            <th>{_screener_header("VOL Z", "vol_z", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["vol_z"])}</th>
+            <th>{_screener_header("QUOTE X", "quote_x", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["quote_x"])}</th>
+            <th>{_screener_header("SQUEEZE", "squeeze", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["squeeze"])}</th>
+            <th>{_screener_header("TOUCHES", "touches", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["touches"])}</th>
+            <th>{_screener_header("FRESHNESS", "freshness", scope=scope, limit=limit, current_sort_by=sort_by, current_sort_dir=sort_dir, tooltip=SCREENER_TOOLTIPS["freshness"])}</th>
+            <th>Note</th>
+            <th>Updated</th>
           </tr>
         </thead>
         <tbody>{''.join(rendered_rows)}</tbody>
@@ -1467,15 +1634,73 @@ def _settings_table(settings: Settings, minimum_alert_confidence: float, risk_us
     """
 
 
+STRATEGY_FIELD_HELP = {
+    "timeframe": "Execution timeframe for the trigger. 5m is faster and stricter; 15m is slower and more selective.",
+    "minimum_expected_rr": "Minimum expected reward-to-risk. Values below 2.0 are usually too weak for this bot.",
+    "actionable_confidence_threshold": "Confidence threshold for an actionable setup.",
+    "watchlist_confidence_threshold": "Confidence threshold for a watch setup before activation.",
+    "volume_z_threshold": "Minimum volume z-score for an activated breakout.",
+    "watchlist_volume_z_threshold": "Minimum volume z-score for a watch setup near the level.",
+    "min_touches": "Minimum number of touches around the level. More touches usually mean a cleaner breakout level.",
+    "squeeze_threshold": "Minimum squeeze score for a clean pressure build-up into the level.",
+    "dist_to_level_atr": "How close price must stay to the level, in ATR units, to qualify as a watch setup.",
+    "breakout_distance_atr": "How far the breakout close must extend beyond the level, in ATR units.",
+    "body_ratio_threshold": "Minimum candle body ratio for the breakout candle. Higher means stronger close conviction.",
+    "close_to_extreme_threshold": "How close the candle must close to its extreme. Lower values mean stronger impulse candles.",
+    "range_expansion_threshold": "Required range expansion versus recent candles. Higher means more explosive breakouts only.",
+    "sl_multiplier": "ATR floor used in stop-distance calculation. Higher values widen the minimum stop and reduce position size.",
+}
+
+
+def _strategy_input(name: str, label: str, value: str, *, tooltip: str, min_value: str | None = None, max_value: str | None = None, step: str | None = None) -> str:
+    attrs = []
+    if min_value is not None:
+        attrs.append(f'min="{min_value}"')
+    if max_value is not None:
+        attrs.append(f'max="{max_value}"')
+    if step is not None:
+        attrs.append(f'step="{step}"')
+    attr_text = ' '.join(attrs)
+    return f"""
+    <label class="field-block">
+      <span class="tooltip-anchor" data-tooltip="{escape(tooltip)}">{escape(label)}</span>
+      <input type="number" name="{escape(name)}" value="{escape(value)}" {attr_text}>
+    </label>
+    """
+
+
 def _runtime_settings_form(
     minimum_alert_confidence: float,
     risk_usdt: float,
+    strategy_config: StrategyRuntimeConfig,
     *,
     threshold_saved: bool,
     risk_saved: bool,
+    strategy_saved: str | None,
 ) -> str:
-    threshold_message = "<div class=\"muted\">Threshold saved. Engine will apply it on the next cycle.</div>" if threshold_saved else ""
-    risk_message = "<div class=\"muted\">Risk USDT saved. Qty and projected TP profit are recalculated immediately in the UI.</div>" if risk_saved else ""
+    threshold_message = '<div class="muted">Threshold saved. Engine will apply it on the next cycle.</div>' if threshold_saved else ''
+    risk_message = '<div class="muted">Risk USDT saved. Qty and projected TP profit are recalculated immediately in the UI.</div>' if risk_saved else ''
+    strategy_message = ''
+    if strategy_saved == "applied":
+        strategy_message = '<div class="muted">Strategy runtime settings saved. Engine and screener will use them on the next cycle.</div>'
+    elif strategy_saved == "defaults":
+        strategy_message = '<div class="muted">Default strategy values restored.</div>'
+    strategy_fields = ''.join([
+        f"""<label class="field-block"><span class="tooltip-anchor" data-tooltip="{escape(STRATEGY_FIELD_HELP['timeframe'])}">Timeframe</span><select name="timeframe"><option value="5m" {'selected' if strategy_config.timeframe.value == '5m' else ''}>5m</option><option value="15m" {'selected' if strategy_config.timeframe.value == '15m' else ''}>15m</option></select></label>""",
+        _strategy_input('minimum_expected_rr', 'Min expected R:R', f'{strategy_config.minimum_expected_rr:.2f}', tooltip=STRATEGY_FIELD_HELP['minimum_expected_rr'], min_value='1', max_value='10', step='0.1'),
+        _strategy_input('actionable_confidence_threshold', 'Actionable confidence', f'{strategy_config.actionable_confidence_threshold:.1f}', tooltip=STRATEGY_FIELD_HELP['actionable_confidence_threshold'], min_value='0', max_value='100', step='0.1'),
+        _strategy_input('watchlist_confidence_threshold', 'Watch confidence', f'{strategy_config.watchlist_confidence_threshold:.1f}', tooltip=STRATEGY_FIELD_HELP['watchlist_confidence_threshold'], min_value='0', max_value='100', step='0.1'),
+        _strategy_input('volume_z_threshold', 'volume_z_threshold', f'{strategy_config.volume_z_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['volume_z_threshold'], min_value='0', max_value='20', step='0.05'),
+        _strategy_input('watchlist_volume_z_threshold', 'watchlist_volume_z_threshold', f'{strategy_config.watchlist_volume_z_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['watchlist_volume_z_threshold'], min_value='0', max_value='20', step='0.05'),
+        _strategy_input('min_touches', 'min_touches', str(strategy_config.min_touches), tooltip=STRATEGY_FIELD_HELP['min_touches'], min_value='1', max_value='10', step='1'),
+        _strategy_input('squeeze_threshold', 'squeeze_threshold', f'{strategy_config.squeeze_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['squeeze_threshold'], min_value='0', max_value='1.5', step='0.01'),
+        _strategy_input('dist_to_level_atr', 'dist_to_level_atr', f'{strategy_config.dist_to_level_atr:.2f}', tooltip=STRATEGY_FIELD_HELP['dist_to_level_atr'], min_value='0', max_value='5', step='0.01'),
+        _strategy_input('breakout_distance_atr', 'breakout_distance_atr', f'{strategy_config.breakout_distance_atr:.2f}', tooltip=STRATEGY_FIELD_HELP['breakout_distance_atr'], min_value='0', max_value='5', step='0.01'),
+        _strategy_input('body_ratio_threshold', 'body_ratio_threshold', f'{strategy_config.body_ratio_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['body_ratio_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_input('close_to_extreme_threshold', 'close_to_extreme_threshold', f'{strategy_config.close_to_extreme_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['close_to_extreme_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_input('range_expansion_threshold', 'range_expansion_threshold', f'{strategy_config.range_expansion_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['range_expansion_threshold'], min_value='0', max_value='10', step='0.05'),
+        _strategy_input('sl_multiplier', 'sl_multiplier', f'{strategy_config.sl_multiplier:.2f}', tooltip=STRATEGY_FIELD_HELP['sl_multiplier'], min_value='0.01', max_value='5', step='0.01'),
+    ])
     return f"""
     <div class="scan-card">
       <h3>Telegram send threshold</h3>
@@ -1492,6 +1717,14 @@ def _runtime_settings_form(
         <button type="submit">Apply risk</button>
       </form>
       {risk_message}
+      <h3>Strategy runtime</h3>
+      <div class="muted">Adjust breakout filters without restarting the stack. The values are applied from Redis at runtime.</div>
+      <form class="manual-form strategy-form" method="get" action="/settings/apply-strategy">
+        {strategy_fields}
+        <button type="submit">Apply</button>
+        <a class="button-link" href="/settings/strategy-defaults">By default</a>
+      </form>
+      {strategy_message}
     </div>
     """
 

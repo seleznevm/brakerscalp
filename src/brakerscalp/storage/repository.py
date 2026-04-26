@@ -177,6 +177,7 @@ class Repository:
         direction: str,
         level_id: str,
         within_minutes: int,
+        setup_stage: str | None = None,
     ) -> SignalRecord | None:
         cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=within_minutes)
         async with self.session_factory() as session:
@@ -192,9 +193,15 @@ class Repository:
                     SignalRecord.detected_at >= cutoff,
                 )
                 .order_by(desc(SignalRecord.detected_at))
-                .limit(1)
+                .limit(20)
             )
-            return result.scalar_one_or_none()
+            matches = list(result.scalars())
+            if setup_stage is None:
+                return matches[0] if matches else None
+            for item in matches:
+                if str((item.render_context or {}).get("setup_stage", "")) == setup_stage:
+                    return item
+            return None
 
     async def ensure_delivery(self, alert: AlertMessage) -> None:
         now = datetime.now(tz=timezone.utc)

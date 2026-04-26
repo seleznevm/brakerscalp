@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import openpyxl
@@ -11,6 +12,7 @@ import pytest
 from brakerscalp.config import Settings
 from brakerscalp.domain.models import DataHealth, Direction, MarketCandle, ScoreContribution, SetupType, SignalClass, SignalDecision, Timeframe, UniverseSymbol, Venue
 from brakerscalp.services.api_service import build_api
+from brakerscalp.signals.engine import ScreeningResult
 from brakerscalp.universe import save_universe
 
 
@@ -362,7 +364,7 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
     app = build_api(repository, cache, settings, universe=[], adapters={})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
-        response = await client.get("/setups?status=failed")
+        response = await client.get("/setups?status=failed&min_confidence=")
 
     assert response.status_code == 200
     assert "SOLUSDT" in response.text
@@ -451,6 +453,148 @@ async def test_setups_page_uses_first_call_time_for_grouped_setup(repository, ca
     assert response.status_code == 200
     assert "25.04.2026 10:00:00" in response.text
     assert "25.04.2026 12:00:00" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_screener_page_supports_sorting_and_tooltips(repository, cache) -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+    )
+    fake_rows = [
+        ScreeningResult(
+            symbol="BTCUSDT",
+            venue=Venue.BINANCE,
+            setup=SetupType.BREAKOUT,
+            status="monitor",
+            confidence=87.0,
+            direction=Direction.LONG,
+            decision=None,
+            last_price=100.0,
+            level_id="btc-level",
+            level_source="cascade-high",
+            level_timeframe=Timeframe.H1,
+            level_lower=99.0,
+            level_upper=100.0,
+            trend_bias=Direction.LONG,
+            trend_score=0.8,
+            coin_score=0.7,
+            is_coin_in_play=True,
+            atr_15m=1.2,
+            volume_z_15m=2.2,
+            volume_z_1h=1.4,
+            range_expansion=1.6,
+            quote_activity_ratio=1.8,
+            squeeze_score=0.74,
+            cascade_touches=4,
+            consolidation_range_atr=1.1,
+            breakout_distance_atr=0.18,
+            body_ratio=0.6,
+            follow_through_5m=True,
+            book_imbalance=0.12,
+            freshness_ms=200,
+            spread_ratio=1.0,
+            notes=["Active breakout pressure"],
+            updated_at=datetime.now(tz=timezone.utc),
+        ),
+        ScreeningResult(
+            symbol="ETHUSDT",
+            venue=Venue.BINANCE,
+            setup=SetupType.BREAKOUT,
+            status="watchlist",
+            confidence=84.0,
+            direction=Direction.SHORT,
+            decision=None,
+            last_price=90.0,
+            level_id="eth-level",
+            level_source="cascade-low",
+            level_timeframe=Timeframe.H1,
+            level_lower=89.0,
+            level_upper=90.0,
+            trend_bias=Direction.SHORT,
+            trend_score=0.7,
+            coin_score=0.6,
+            is_coin_in_play=True,
+            atr_15m=1.0,
+            volume_z_15m=1.1,
+            volume_z_1h=1.0,
+            range_expansion=1.2,
+            quote_activity_ratio=1.3,
+            squeeze_score=0.81,
+            cascade_touches=3,
+            consolidation_range_atr=1.4,
+            breakout_distance_atr=0.05,
+            body_ratio=0.5,
+            follow_through_5m=False,
+            book_imbalance=-0.08,
+            freshness_ms=120,
+            spread_ratio=1.1,
+            notes=["Near level"],
+            updated_at=datetime.now(tz=timezone.utc),
+        ),
+    ]
+    with patch("brakerscalp.services.api_service.MarketInspector.screen_universe", new=AsyncMock(return_value=fake_rows)):
+        app = build_api(repository, cache, settings, universe=[], adapters={})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+            response = await client.get("/screener?sort_by=vol_z&sort_dir=asc")
+
+    assert response.status_code == 200
+    assert "Монета" in response.text
+    assert "data-tooltip=\"HTF direction from the 1h/4h trend." in response.text
+    assert "sort_by=symbol" in response.text
+    assert response.text.index("ETHUSDT") < response.text.index("BTCUSDT")
+
+
+@pytest.mark.asyncio
+async def test_settings_strategy_routes_store_runtime_configuration(repository, cache) -> None:
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        apply_response = await client.get(
+            "/settings/apply-strategy"
+            "?timeframe=5m"
+            "&minimum_expected_rr=2.4"
+            "&actionable_confidence_threshold=91"
+            "&watchlist_confidence_threshold=84"
+            "&volume_z_threshold=2.15"
+            "&watchlist_volume_z_threshold=1.25"
+            "&min_touches=4"
+            "&squeeze_threshold=0.82"
+            "&dist_to_level_atr=0.28"
+            "&breakout_distance_atr=0.21"
+            "&body_ratio_threshold=0.61"
+            "&close_to_extreme_threshold=0.18"
+            "&range_expansion_threshold=1.45"
+            "&sl_multiplier=0.30"
+        )
+        applied = await cache.get_strategy_config(default=settings.default_strategy_config())
+        defaults_response = await client.get("/settings/strategy-defaults")
+    restored = await cache.get_strategy_config(default=settings.default_strategy_config())
+
+    assert apply_response.status_code == 303
+    assert apply_response.headers["location"] == "/settings?strategy_saved=applied"
+    assert applied["timeframe"] == "5m"
+    assert applied["volume_z_threshold"] == 2.15
+    assert applied["min_touches"] == 4
+    assert defaults_response.status_code == 303
+    assert defaults_response.headers["location"] == "/settings?strategy_saved=defaults"
+    assert restored["timeframe"] == settings.default_strategy_config()["timeframe"]
+    assert restored["volume_z_threshold"] == settings.default_strategy_config()["volume_z_threshold"]
 
 
 @pytest.mark.asyncio
