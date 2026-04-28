@@ -30,11 +30,16 @@ class StrategyRuntimeConfig(BaseModel):
     minimum_expected_rr: float = 2.0
     actionable_confidence_threshold: float = 88.0
     watchlist_confidence_threshold: float = 82.0
+    pre_alert_confidence_threshold: float = 75.0
     volume_z_threshold: float = 1.80
     watchlist_volume_z_threshold: float = 1.05
+    pre_alert_volume_z_threshold: float = 0.0
     min_touches: int = 3
     squeeze_threshold: float = 0.72
+    pre_alert_squeeze_threshold: float = 0.60
     dist_to_level_atr: float = 0.35
+    pre_alert_distance_atr_min: float = 0.2
+    pre_alert_distance_atr_max: float = 1.5
     breakout_distance_atr: float = 0.18
     body_ratio_threshold: float = 0.58
     close_to_extreme_threshold: float = 0.22
@@ -274,6 +279,7 @@ class RuleEngine:
                     breakout=breakout,
                     confidence=confidence,
                     contributions=contributions,
+                    signal_class=self._classify(confidence),
                     confirmed_breakout=True,
                 )
             elif self._should_emit_watchlist(level, coin, structure, breakout, confidence):
@@ -289,9 +295,26 @@ class RuleEngine:
                     breakout=breakout,
                     confidence=confidence,
                     contributions=contributions,
+                    signal_class=SignalClass.WATCHLIST,
                     confirmed_breakout=False,
                 )
-            priority = confidence + (6.0 if breakout.signal_ready else 0.0) + (4.0 if structure.is_valid else 0.0)
+            elif self._should_emit_pre_alert(level, coin, structure, breakout, confidence):
+                decision = self._build_decision(
+                    payload=payload,
+                    level=level,
+                    current=current,
+                    atr_15m=execution_atr,
+                    direction=direction,
+                    trend=trend,
+                    coin=coin,
+                    structure=structure,
+                    breakout=breakout,
+                    confidence=confidence,
+                    contributions=contributions,
+                    signal_class=SignalClass.PRE_ALERT,
+                    confirmed_breakout=False,
+                )
+            priority = confidence + (6.0 if breakout.signal_ready else 0.0) + (4.0 if structure.is_valid else 0.0) + (1.5 if decision and decision.signal_class == SignalClass.PRE_ALERT else 0.0)
             if best_bundle is None or priority > best_bundle[0]:
                 best_bundle = (priority, level, direction, structure, breakout, confidence, contributions, decision)
 
@@ -737,12 +760,14 @@ class RuleEngine:
         breakout: BreakoutState,
         confidence: float,
         contributions: list[ScoreContribution],
+        signal_class: SignalClass,
         confirmed_breakout: bool,
     ) -> SignalDecision | None:
-        signal_class = self._classify(confidence) if confirmed_breakout else SignalClass.WATCHLIST
         if confirmed_breakout and signal_class == SignalClass.SUPPRESSED:
             return None
-        if not confirmed_breakout and confidence < self.strategy.watchlist_confidence_threshold:
+        if signal_class == SignalClass.WATCHLIST and confidence < self.strategy.watchlist_confidence_threshold:
+            return None
+        if signal_class == SignalClass.PRE_ALERT and confidence < self.strategy.pre_alert_confidence_threshold:
             return None
 
         if confirmed_breakout:
@@ -763,11 +788,16 @@ class RuleEngine:
         expected_rr = abs((t1 - entry_price) / risk)
         if expected_rr < self.minimum_expected_rr:
             return None
-        stage = "activated" if confirmed_breakout else "watch"
+        if signal_class == SignalClass.PRE_ALERT:
+            stage = "pre_alert"
+        else:
+            stage = "activated" if confirmed_breakout else "watch"
         alert_key = f"{payload.symbol}:breakout:{direction.value}:{level.level_id}:{self.strategy.timeframe.value}:{stage}:{level.detected_at.date().isoformat()}"
 
         why_not_higher: list[str] = []
-        if not confirmed_breakout:
+        if signal_class == SignalClass.PRE_ALERT:
+            why_not_higher.append("EARLY WARNING: breakout has not started yet. Wait for volume and level approach.")
+        elif not confirmed_breakout:
             why_not_higher.append("Пробой еще не подтвержден закрытием 5m свечи за уровнем.")
         if trend.bias != direction:
             why_not_higher.append("Текущий HTF тренд не полностью синхронизирован с направлением пробоя.")
@@ -829,7 +859,17 @@ class RuleEngine:
         render_context = {
             "price_zone": level.zone_text,
             "htf_source": f"{level.timeframe.value} {level.source}",
-            "trigger": self._trigger_text(direction, current, level, breakout.breakout_distance_atr, confirmed_breakout, entry_price),
+            "trigger": self._trigger_text(
+                direction,
+                current,
+                level,
+                breakout.breakout_distance_atr,
+                confirmed_breakout,
+                entry_price,
+                signal_class,
+                structure.near_level_atr,
+                structure.squeeze_score,
+            ),
             "stop_logic": self._stop_logic(direction, invalidation, structure.anchor_price, level),
             "cancel_if": (
                 "5m закрытие вернулось под уровень / данные устарели / спред резко расширился"
@@ -846,6 +886,7 @@ class RuleEngine:
             "minimum_expected_rr": self.minimum_expected_rr,
             "chart_timeframe": self.strategy.timeframe.value,
             "setup_stage": stage,
+            "signal_class": signal_class.value,
             "trend_bias": trend.bias.value if trend.bias else None,
             "cascade_touches": structure.cascade_touches,
             "consolidation_range_atr": structure.consolidation_range_atr,
@@ -897,6 +938,7 @@ class RuleEngine:
                 "round_number_score": breakout.round_number_score,
                 "liquidation_cluster_score": breakout.liquidation_cluster_score,
                 "correlation_headwind": breakout.correlation_headwind,
+                "signal_class": signal_class.value,
             },
             render_context=render_context,
         )
@@ -1109,7 +1151,16 @@ class RuleEngine:
         breakout_distance_atr: float,
         confirmed_breakout: bool,
         entry_price: float,
+        signal_class: SignalClass,
+        near_level_atr: float,
+        squeeze_score: float,
     ) -> str:
+        if signal_class == SignalClass.PRE_ALERT:
+            return (
+                f"Цена на подходе к уровню ({near_level_atr:.2f} ATR). "
+                f"Идет сжатие волатильности (Squeeze: {squeeze_score:.2f}). "
+                "Приготовьтесь к возможному пробою."
+            )
         if direction == Direction.LONG and confirmed_breakout:
             return f"5m закрытие выше зоны сопротивления на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
         if direction == Direction.SHORT and confirmed_breakout:
@@ -1143,6 +1194,26 @@ class RuleEngine:
         if structure.score >= 0.40 or coin.score >= 0.35:
             return "monitor"
         return "cold"
+
+    def _should_emit_pre_alert(
+        self,
+        level: LevelCandidate,
+        coin: CoinState,
+        structure: StructureState,
+        breakout: BreakoutState,
+        confidence: float,
+    ) -> bool:
+        return (
+            confidence >= self.strategy.pre_alert_confidence_threshold
+            and self.strategy.pre_alert_distance_atr_min <= structure.near_level_atr <= self.strategy.pre_alert_distance_atr_max
+            and structure.squeeze_score >= self.strategy.pre_alert_squeeze_threshold
+            and structure.cascade_touches >= self.strategy.min_touches
+            and breakout.volume_z >= self.strategy.pre_alert_volume_z_threshold
+            and coin.is_active
+            and not breakout.correlation_headwind
+            and not breakout.signal_ready
+            and level.kind in {LevelKind.RESISTANCE, LevelKind.SUPPORT}
+        )
 
     def _should_emit_watchlist(
         self,

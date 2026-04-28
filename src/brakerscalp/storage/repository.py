@@ -189,7 +189,7 @@ class Repository:
                     SignalRecord.setup == setup,
                     SignalRecord.direction == direction,
                     SignalRecord.level_id == level_id,
-                    SignalRecord.signal_class.in_(["actionable", "watchlist"]),
+                    SignalRecord.signal_class.in_(["actionable", "watchlist", "pre_alert"]),
                     SignalRecord.detected_at >= cutoff,
                 )
                 .order_by(desc(SignalRecord.detected_at))

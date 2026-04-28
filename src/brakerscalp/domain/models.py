@@ -41,6 +41,7 @@ class Direction(StrEnum):
 
 
 class SignalClass(StrEnum):
+    PRE_ALERT = "pre_alert"
     ACTIONABLE = "actionable"
     WATCHLIST = "watchlist"
     SUPPRESSED = "suppressed"

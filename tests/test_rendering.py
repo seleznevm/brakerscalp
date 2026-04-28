@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from brakerscalp.domain.models import Timeframe, Venue
-from brakerscalp.signals.engine import EngineInput, RuleEngine
+from brakerscalp.domain.models import Venue
 from brakerscalp.signals.charting import render_signal_chart
+from brakerscalp.signals.engine import EngineInput, RuleEngine
 from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.signals.rendering import render_chart_caption, render_signal
 
@@ -26,9 +26,12 @@ def test_render_signal_contains_required_sections(make_breakout_market, make_boo
             cross_venue_health=[make_health(venue=Venue.BYBIT), make_health(venue=Venue.OKX)],
         )
     )
+    assert decision is not None
+
     text = render_signal(decision)
     assert "#BREAKOUT" in text
     assert "#BTC" in text
+    assert decision.signal_class.value.upper() in text
     assert "Уверенность:" in text
     assert "Триггер:" in text
     assert "Обоснование:" in text
@@ -60,10 +63,12 @@ def test_render_signal_marks_activated_setups(make_breakout_market, make_book, m
             cross_venue_health=[make_health(venue=Venue.BYBIT), make_health(venue=Venue.OKX)],
         )
     )
+    assert decision is not None
     decision.render_context["setup_stage"] = "activated"
 
     text = render_signal(decision)
     caption = render_chart_caption(decision)
 
+    assert decision.signal_class.value.upper() in caption
     assert text.endswith("ACTIVATED")
     assert caption.endswith("ACTIVATED")

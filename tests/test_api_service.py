@@ -581,11 +581,16 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
             "&minimum_expected_rr=2.4"
             "&actionable_confidence_threshold=91"
             "&watchlist_confidence_threshold=84"
+            "&pre_alert_confidence_threshold=77"
             "&volume_z_threshold=2.15"
             "&watchlist_volume_z_threshold=1.25"
+            "&pre_alert_volume_z_threshold=0.10"
             "&min_touches=4"
             "&squeeze_threshold=0.82"
+            "&pre_alert_squeeze_threshold=0.62"
             "&dist_to_level_atr=0.28"
+            "&pre_alert_distance_atr_min=0.25"
+            "&pre_alert_distance_atr_max=1.40"
             "&breakout_distance_atr=0.21"
             "&body_ratio_threshold=0.61"
             "&close_to_extreme_threshold=0.18"
@@ -616,6 +621,8 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
     assert applied["timeframe"] == "5m"
     assert applied["volume_z_threshold"] == 2.15
     assert applied["min_touches"] == 4
+    assert applied["pre_alert_confidence_threshold"] == 77.0
+    assert applied["pre_alert_distance_atr_max"] == 1.4
     assert applied["delta_ratio_threshold"] == 0.16
     assert applied["enable_btc_eth_correlation_filter"] is False
     assert applied["btc_correlation_threshold"] == 0.55

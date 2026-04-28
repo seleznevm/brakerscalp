@@ -26,8 +26,9 @@ def render_signal(decision: SignalDecision) -> str:
     why_lines = _bullet_lines(decision.why_not_higher)
     targets = decision.targets[:2]
     target_lines = "\n".join(f"- T{index + 1}: {price:.4f}" for index, price in enumerate(targets))
+    signal_class = decision.signal_class.value.upper()
     text = (
-        f"🚨 {decision.symbol} | {decision.setup.value.upper()} | {decision.direction.value.upper()} | {decision.timeframe.value}\n"
+        f"🚨 {decision.symbol} | {decision.setup.value.upper()} | {decision.direction.value.upper()} | {decision.timeframe.value} | {signal_class}\n"
         f"{_hashtags(decision)}\n"
         f"Уверенность: {decision.confidence:.0f}\n\n"
         f"Уровень:\n"
@@ -62,8 +63,9 @@ def render_signal(decision: SignalDecision) -> str:
 def render_chart_caption(decision: SignalDecision) -> str:
     setup = decision.setup.value if hasattr(decision.setup, "value") else str(decision.setup)
     direction = decision.direction.value if hasattr(decision.direction, "value") else str(decision.direction)
+    signal_class = decision.signal_class.value.upper()
     text = (
-        f"{decision.symbol} | {setup.upper()} | {direction.upper()}\n"
+        f"{decision.symbol} | {setup.upper()} | {direction.upper()} | {signal_class}\n"
         f"{_hashtags(decision)}\n"
         f"Entry {decision.entry_price:.4f} | SL {decision.invalidation_price:.4f} | T1 {decision.targets[0]:.4f}"
     )

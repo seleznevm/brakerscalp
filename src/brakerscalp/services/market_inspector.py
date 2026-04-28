@@ -96,7 +96,7 @@ class ChartSignalSnapshot:
 
 
 class MarketInspector:
-    ACTIVE_STATUSES = {"actionable", "watchlist", "arming", "monitor"}
+    ACTIVE_STATUSES = {"actionable", "watchlist", "pre_alert", "arming", "monitor"}
 
     def __init__(
         self,
@@ -197,7 +197,7 @@ class MarketInspector:
     ) -> list[SetupCard]:
         end_at = datetime.now(tz=timezone.utc)
         start_at = end_at - timedelta(hours=within_hours)
-        signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
+        signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist", "pre_alert"])
         cards: list[SetupCard] = []
         query = (symbol_query or "").strip().upper()
         grouped_signals = self._group_signals_by_setup(signals)
@@ -223,7 +223,7 @@ class MarketInspector:
         end_at: datetime,
         symbol_query: str | None = None,
     ) -> StatisticsSnapshot:
-        signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
+        signals = await self.repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist", "pre_alert"])
         query = (symbol_query or "").strip().upper()
         grouped_signals = self._group_signals_by_setup(signals)
         by_symbol: dict[str, dict[str, float]] = defaultdict(
@@ -526,11 +526,12 @@ class MarketInspector:
         order = {
             "actionable": 0,
             "watchlist": 1,
-            "arming": 2,
-            "monitor": 3,
-            "cold": 4,
-            "stale": 5,
-            "insufficient": 6,
+            "pre_alert": 2,
+            "arming": 3,
+            "monitor": 4,
+            "cold": 5,
+            "stale": 6,
+            "insufficient": 7,
         }
         return (order.get(item.status, 9), -item.confidence, -int(item.updated_at.timestamp()))
 

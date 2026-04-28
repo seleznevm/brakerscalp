@@ -49,11 +49,16 @@ class Settings(BaseSettings):
     strategy_minimum_expected_rr: float = 2.0
     strategy_actionable_confidence_threshold: float = 88.0
     strategy_watchlist_confidence_threshold: float = 82.0
+    strategy_pre_alert_confidence_threshold: float = 75.0
     strategy_volume_z_threshold: float = 1.80
     strategy_watchlist_volume_z_threshold: float = 1.05
+    strategy_pre_alert_volume_z_threshold: float = 0.0
     strategy_min_touches: int = 3
     strategy_squeeze_threshold: float = 0.72
+    strategy_pre_alert_squeeze_threshold: float = 0.60
     strategy_dist_to_level_atr: float = 0.35
+    strategy_pre_alert_distance_atr_min: float = 0.2
+    strategy_pre_alert_distance_atr_max: float = 1.5
     strategy_breakout_distance_atr: float = 0.18
     strategy_body_ratio_threshold: float = 0.58
     strategy_close_to_extreme_threshold: float = 0.22
@@ -153,11 +158,16 @@ class Settings(BaseSettings):
             "minimum_expected_rr": self.strategy_minimum_expected_rr,
             "actionable_confidence_threshold": self.strategy_actionable_confidence_threshold,
             "watchlist_confidence_threshold": self.strategy_watchlist_confidence_threshold,
+            "pre_alert_confidence_threshold": self.strategy_pre_alert_confidence_threshold,
             "volume_z_threshold": self.strategy_volume_z_threshold,
             "watchlist_volume_z_threshold": self.strategy_watchlist_volume_z_threshold,
+            "pre_alert_volume_z_threshold": self.strategy_pre_alert_volume_z_threshold,
             "min_touches": self.strategy_min_touches,
             "squeeze_threshold": self.strategy_squeeze_threshold,
+            "pre_alert_squeeze_threshold": self.strategy_pre_alert_squeeze_threshold,
             "dist_to_level_atr": self.strategy_dist_to_level_atr,
+            "pre_alert_distance_atr_min": self.strategy_pre_alert_distance_atr_min,
+            "pre_alert_distance_atr_max": self.strategy_pre_alert_distance_atr_max,
             "breakout_distance_atr": self.strategy_breakout_distance_atr,
             "body_ratio_threshold": self.strategy_body_ratio_threshold,
             "close_to_extreme_threshold": self.strategy_close_to_extreme_threshold,
