@@ -11,6 +11,7 @@ def test_detect_levels(make_candles) -> None:
     levels = detector.detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
     assert levels
     assert any(level.kind.value == "resistance" for level in levels)
+    assert any(level.source == "round-number" for level in levels)
 
 
 def test_level_ids_are_stable(make_candles) -> None:

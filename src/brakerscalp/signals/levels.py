@@ -67,6 +67,8 @@ class LevelDetector:
         )
 
         levels.extend(self._cascade_levels(symbol, venue, candles_1h, zone_half_width))
+        levels.extend(self._liquidation_levels(symbol, venue, candles_1h, zone_half_width))
+        levels.extend(self._round_number_levels(symbol, venue, candles_1h[-1], zone_half_width))
 
         vwap = rolling_vwap(candles_1h[-48:], period=min(48, len(candles_1h[-48:])))
         levels.append(self._make_level(symbol, venue, Timeframe.H1, LevelKind.SUPPORT, "vwap-zone", vwap, zone_half_width, candles_1h[-1], 0.6))
@@ -187,3 +189,109 @@ class LevelDetector:
             if not matched:
                 clusters.append([price])
         return clusters
+
+    def _liquidation_levels(
+        self,
+        symbol: str,
+        venue: Venue,
+        candles_1h: list[MarketCandle],
+        zone_half_width: float,
+    ) -> list[LevelCandidate]:
+        recent = candles_1h[-48:]
+        if len(recent) < 18:
+            return []
+        highs = sorted(item.high for item in recent)
+        lows = sorted(item.low for item in recent)
+        high_clusters = [cluster for cluster in self._cluster_prices(highs[-18:], tolerance=zone_half_width * 1.35) if len(cluster) >= 3]
+        low_clusters = [cluster for cluster in self._cluster_prices(lows[:18], tolerance=zone_half_width * 1.35) if len(cluster) >= 3]
+        levels: list[LevelCandidate] = []
+        for cluster in high_clusters[-2:]:
+            reference_price = sum(cluster) / len(cluster)
+            level = self._make_level(
+                symbol=symbol,
+                venue=venue,
+                timeframe=Timeframe.H1,
+                kind=LevelKind.RESISTANCE,
+                source="liquidation-cluster-high",
+                reference_price=reference_price,
+                zone_half_width=zone_half_width,
+                candle=recent[-1],
+                strength=min(0.82 + len(cluster) * 0.03, 0.97),
+            )
+            level.touches = len(cluster)
+            levels.append(level)
+        for cluster in low_clusters[:2]:
+            reference_price = sum(cluster) / len(cluster)
+            level = self._make_level(
+                symbol=symbol,
+                venue=venue,
+                timeframe=Timeframe.H1,
+                kind=LevelKind.SUPPORT,
+                source="liquidation-cluster-low",
+                reference_price=reference_price,
+                zone_half_width=zone_half_width,
+                candle=recent[-1],
+                strength=min(0.82 + len(cluster) * 0.03, 0.97),
+            )
+            level.touches = len(cluster)
+            levels.append(level)
+        return levels
+
+    def _round_number_levels(
+        self,
+        symbol: str,
+        venue: Venue,
+        current_candle: MarketCandle,
+        zone_half_width: float,
+    ) -> list[LevelCandidate]:
+        step = self._round_step(current_candle.close)
+        if step <= 0:
+            return []
+        rounded = round(current_candle.close / step) * step
+        candidates = [rounded - step, rounded, rounded + step]
+        levels: list[LevelCandidate] = []
+        for price in candidates:
+            if price <= 0:
+                continue
+            levels.append(
+                self._make_level(
+                    symbol=symbol,
+                    venue=venue,
+                    timeframe=Timeframe.H1,
+                    kind=LevelKind.SUPPORT,
+                    source="round-number",
+                    reference_price=price,
+                    zone_half_width=zone_half_width,
+                    candle=current_candle,
+                    strength=0.74,
+                )
+            )
+            levels.append(
+                self._make_level(
+                    symbol=symbol,
+                    venue=venue,
+                    timeframe=Timeframe.H1,
+                    kind=LevelKind.RESISTANCE,
+                    source="round-number",
+                    reference_price=price,
+                    zone_half_width=zone_half_width,
+                    candle=current_candle,
+                    strength=0.74,
+                )
+            )
+        return levels
+
+    def _round_step(self, price: float) -> float:
+        if price >= 10000:
+            return 500.0
+        if price >= 1000:
+            return 100.0
+        if price >= 100:
+            return 10.0
+        if price >= 10:
+            return 1.0
+        if price >= 1:
+            return 0.1
+        if price >= 0.1:
+            return 0.01
+        return 0.001

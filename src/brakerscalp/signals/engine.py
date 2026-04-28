@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from brakerscalp.domain.models import (
     LevelCandidate,
     LevelKind,
     MarketCandle,
+    OrderFlowSnapshot,
     ScoreContribution,
     SetupType,
     SignalClass,
@@ -43,6 +44,17 @@ class StrategyRuntimeConfig(BaseModel):
     watchlist_delta_ratio_threshold: float = 0.04
     cvd_slope_threshold: float = 0.06
     delta_divergence_threshold: float = 0.08
+    enable_btc_eth_correlation_filter: bool = True
+    btc_correlation_threshold: float = 0.45
+    enable_liquidation_levels: bool = True
+    enable_round_number_levels: bool = True
+    enable_tick_velocity_alerts: bool = True
+    tick_velocity_alert_multiplier: float = 1.8
+    enable_time_stop_alerts: bool = True
+    time_stop_minutes: int = 3
+    time_stop_min_move_pct: float = 1.0
+    enable_dynamic_breakeven_alerts: bool = True
+    breakeven_trigger_pct: float = 0.5
 
 
 @dataclass(slots=True)
@@ -54,11 +66,13 @@ class EngineInput:
     candles_15m: list[MarketCandle]
     candles_5m: list[MarketCandle]
     levels: list[LevelCandidate]
-    trades: list[TradeTick]
     book: BookSnapshot | None
     derivative_context: DerivativeContext | None
     health: DataHealth
     cross_venue_health: list[DataHealth]
+    trades: list[TradeTick] = field(default_factory=list)
+    order_flow: OrderFlowSnapshot | None = None
+    benchmark_candles_5m: dict[str, list[MarketCandle]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -116,6 +130,11 @@ class BreakoutState:
     delta_divergence: bool
     aggressive_flow_support: bool
     watch_flow_support: bool
+    tick_velocity_ratio: float
+    round_number_score: float
+    liquidation_cluster_score: float
+    correlation_headwind: bool
+    benchmark_support_score: float
 
 
 @dataclass(slots=True)
@@ -152,6 +171,7 @@ class ScreeningResult:
     delta_ratio: float
     cvd_slope: float
     delta_divergence: bool
+    tick_velocity_ratio: float
     freshness_ms: int
     spread_ratio: float
     notes: list[str]
@@ -233,9 +253,11 @@ class RuleEngine:
                 atr_execution=execution_atr,
                 direction=direction,
                 trades=payload.trades,
+                order_flow=payload.order_flow,
                 book=payload.book,
                 health=payload.health,
                 cross_venue_health=payload.cross_venue_health,
+                benchmark_candles_5m=payload.benchmark_candles_5m,
             )
             confidence, contributions = self._score_candidate(level, direction, trend, coin, structure, breakout)
             decision = None
@@ -319,6 +341,7 @@ class RuleEngine:
             delta_ratio=breakout.delta_ratio,
             cvd_slope=breakout.cvd_slope,
             delta_divergence=breakout.delta_divergence,
+            tick_velocity_ratio=breakout.tick_velocity_ratio,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=breakout.spread_ratio,
             notes=notes,
@@ -369,6 +392,7 @@ class RuleEngine:
             delta_ratio=0.0,
             cvd_slope=0.0,
             delta_divergence=False,
+            tick_velocity_ratio=0.0,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=payload.health.spread_ratio,
             notes=notes,
@@ -378,6 +402,10 @@ class RuleEngine:
     def _candidate_levels(self, candle: MarketCandle, levels: list[LevelCandidate], atr_15m: float) -> list[LevelCandidate]:
         selected: list[LevelCandidate] = []
         for level in levels:
+            if not self.strategy.enable_liquidation_levels and level.source.startswith("liquidation-cluster"):
+                continue
+            if not self.strategy.enable_round_number_levels and level.source == "round-number":
+                continue
             distance = min(abs(candle.close - level.lower_price), abs(candle.close - level.upper_price))
             if distance <= atr_15m * 1.8 or self._is_breakout(candle, level, atr_15m):
                 selected.append(level)
@@ -530,9 +558,11 @@ class RuleEngine:
         atr_execution: float,
         direction: Direction,
         trades: list[TradeTick],
+        order_flow: OrderFlowSnapshot | None,
         book: BookSnapshot | None,
         health: DataHealth,
         cross_venue_health: list[DataHealth],
+        benchmark_candles_5m: dict[str, list[MarketCandle]],
     ) -> BreakoutState:
         candle_range = max(current.high - current.low, 1e-9)
         body_ratio = abs(current.close - current.open) / candle_range
@@ -544,11 +574,25 @@ class RuleEngine:
         fresh_cross = [item for item in cross_venue_health if item.venue != health.venue and item.is_fresh]
         cross_ok = True if not cross_venue_health else len(fresh_cross) >= 1
         data_ok = health.is_fresh and not health.has_sequence_gap and spread_ratio <= 3.5
-        delta_ratio, directional_delta_ratio, cvd_slope, directional_cvd_slope, delta_divergence = self._trade_flow_metrics(
-            trades=trades,
-            execution_candles=execution_candles,
-            direction=direction,
-        )
+        if order_flow is not None:
+            delta_ratio = order_flow.delta_ratio
+            cvd_slope = order_flow.cvd_slope
+            directional_delta_ratio = delta_ratio if direction == Direction.LONG else -delta_ratio
+            directional_cvd_slope = cvd_slope if direction == Direction.LONG else -cvd_slope
+            tick_velocity_ratio = order_flow.tick_velocity_ratio
+            recent_reference = execution_candles[-min(len(execution_candles), 6)]
+            price_change = execution_candles[-1].close - recent_reference.close
+            if direction == Direction.LONG:
+                delta_divergence = price_change > 0 and delta_ratio <= -self.strategy.delta_divergence_threshold
+            else:
+                delta_divergence = price_change < 0 and delta_ratio >= self.strategy.delta_divergence_threshold
+        else:
+            delta_ratio, directional_delta_ratio, cvd_slope, directional_cvd_slope, delta_divergence = self._trade_flow_metrics(
+                trades=trades,
+                execution_candles=execution_candles,
+                direction=direction,
+            )
+            tick_velocity_ratio = 0.0
         aggressive_flow_support = (
             directional_delta_ratio >= self.strategy.delta_ratio_threshold
             and directional_cvd_slope >= self.strategy.cvd_slope_threshold
@@ -569,6 +613,17 @@ class RuleEngine:
             close_to_extreme = (current.close - current.low) / candle_range
             book_support = book_imbalance <= 0.22
 
+        velocity_support = (
+            (not self.strategy.enable_tick_velocity_alerts)
+            or tick_velocity_ratio >= max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15)
+        )
+        round_number_score = self._round_number_score(level, book)
+        liquidation_cluster_score = self._liquidation_cluster_score(level)
+        benchmark_support_score, correlation_headwind = self._benchmark_support(
+            direction=direction,
+            execution_candles=execution_candles,
+            benchmark_candles_5m=benchmark_candles_5m,
+        )
         follow_through_5m = self._follow_through_5m(candles_5m[-3:], level, direction)
         signal_ready = (
             data_ok
@@ -581,6 +636,8 @@ class RuleEngine:
             and book_support
             and cross_ok
             and aggressive_flow_support
+            and velocity_support
+            and not correlation_headwind
         )
         score = min(
             1.0,
@@ -592,6 +649,16 @@ class RuleEngine:
             + (0.06 if book_support else 0.0)
             + (0.08 if aggressive_flow_support else 0.0),
         )
+        if velocity_support and tick_velocity_ratio > 0:
+            score = min(score + min(tick_velocity_ratio / max(self.strategy.tick_velocity_alert_multiplier, 1.0), 1.0) * 0.08, 1.0)
+        if round_number_score > 0:
+            score = min(score + round_number_score * 0.05, 1.0)
+        if liquidation_cluster_score > 0:
+            score = min(score + liquidation_cluster_score * 0.06, 1.0)
+        if benchmark_support_score > 0:
+            score = min(score + benchmark_support_score * 0.04, 1.0)
+        if correlation_headwind:
+            score = max(score - 0.12, 0.0)
         return BreakoutState(
             signal_ready=signal_ready,
             score=score,
@@ -612,6 +679,11 @@ class RuleEngine:
             delta_divergence=delta_divergence,
             aggressive_flow_support=aggressive_flow_support,
             watch_flow_support=watch_flow_support,
+            tick_velocity_ratio=tick_velocity_ratio,
+            round_number_score=round_number_score,
+            liquidation_cluster_score=liquidation_cluster_score,
+            correlation_headwind=correlation_headwind,
+            benchmark_support_score=benchmark_support_score,
         )
 
     def _score_candidate(
@@ -623,7 +695,13 @@ class RuleEngine:
         structure: StructureState,
         breakout: BreakoutState,
     ) -> tuple[float, list[ScoreContribution]]:
-        level_factor = min(level.strength + min(max(structure.cascade_touches, level.touches), 4) * 0.06, 1.0)
+        level_factor = min(
+            level.strength
+            + min(max(structure.cascade_touches, level.touches), 4) * 0.06
+            + breakout.round_number_score * 0.10
+            + breakout.liquidation_cluster_score * 0.12,
+            1.0,
+        )
         trend_factor = trend.score if trend.bias == direction else (0.38 if trend.bias is None else 0.12)
         structure_factor = structure.score if structure.is_valid else structure.score * 0.72
         breakout_factor = breakout.score if breakout.signal_ready else breakout.score * 0.78
@@ -709,6 +787,12 @@ class RuleEngine:
             why_not_higher.append(
                 f"Aggressive flow is still weak: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}."
             )
+        if breakout.tick_velocity_ratio < max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15):
+            why_not_higher.append(
+                f"Tick velocity is not explosive enough yet: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline."
+            )
+        if breakout.correlation_headwind:
+            why_not_higher.append("BTC/ETH benchmark flow is too supportive for this alt short.")
         if expected_rr < 2.4:
             why_not_higher.append(f"Expected R:R remains close to the minimum threshold: {expected_rr:.2f}.")
         if not why_not_higher:
@@ -726,7 +810,14 @@ class RuleEngine:
                 else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
             ),
             f"Delta / CVD: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}, divergence {'yes' if breakout.delta_divergence else 'no'}.",
+            f"Tick velocity: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline.",
         ]
+        if breakout.round_number_score > 0:
+            rationale.append(f"Round-number confluence: score {breakout.round_number_score:.2f}, level source {level.source}.")
+        if breakout.liquidation_cluster_score > 0:
+            rationale.append(f"Liquidation cluster confluence: score {breakout.liquidation_cluster_score:.2f}.")
+        if breakout.correlation_headwind:
+            rationale.append("BTC/ETH benchmark flow is pressing higher and raises false-breakdown risk for this short.")
         if payload.derivative_context is not None:
             rationale.append(
                 f"Контекст derivatives: funding {payload.derivative_context.funding_rate:.5f}, basis {payload.derivative_context.basis_bps:.1f} bps, OI {payload.derivative_context.open_interest:.2f}."
@@ -759,6 +850,10 @@ class RuleEngine:
             "cascade_touches": structure.cascade_touches,
             "consolidation_range_atr": structure.consolidation_range_atr,
             "squeeze_score": structure.squeeze_score,
+            "tick_velocity_ratio": breakout.tick_velocity_ratio,
+            "round_number_score": breakout.round_number_score,
+            "liquidation_cluster_score": breakout.liquidation_cluster_score,
+            "correlation_headwind": breakout.correlation_headwind,
         }
         return SignalDecision(
             symbol=payload.symbol,
@@ -798,6 +893,10 @@ class RuleEngine:
                 "delta_ratio": breakout.delta_ratio,
                 "cvd_slope": breakout.cvd_slope,
                 "delta_divergence": breakout.delta_divergence,
+                "tick_velocity_ratio": breakout.tick_velocity_ratio,
+                "round_number_score": breakout.round_number_score,
+                "liquidation_cluster_score": breakout.liquidation_cluster_score,
+                "correlation_headwind": breakout.correlation_headwind,
             },
             render_context=render_context,
         )
@@ -863,6 +962,67 @@ class RuleEngine:
             if direction == Direction.SHORT and current <= previous:
                 progress += 1
         return progress / max(len(values) - 1, 1)
+
+    def _round_number_score(self, level: LevelCandidate, book: BookSnapshot | None) -> float:
+        if level.source != "round-number":
+            return 0.0
+        score = 0.55
+        if book is None:
+            return score
+        tolerance = max(abs(level.reference_price) * 0.0015, 1e-9)
+        nearby_bid = sum(item.size for item in book.bids[:10] if abs(item.price - level.reference_price) <= tolerance)
+        nearby_ask = sum(item.size for item in book.asks[:10] if abs(item.price - level.reference_price) <= tolerance)
+        density = nearby_bid + nearby_ask
+        if density <= 0:
+            return score
+        top_depth = sum(item.size for item in book.bids[:10]) + sum(item.size for item in book.asks[:10])
+        density_ratio = density / max(top_depth, 1e-9)
+        return min(score + min(density_ratio, 1.0) * 0.45, 1.0)
+
+    def _liquidation_cluster_score(self, level: LevelCandidate) -> float:
+        if not level.source.startswith("liquidation-cluster"):
+            return 0.0
+        return min(0.45 + min(level.touches, 6) * 0.08 + level.strength * 0.20, 1.0)
+
+    def _benchmark_support(
+        self,
+        *,
+        direction: Direction,
+        execution_candles: list[MarketCandle],
+        benchmark_candles_5m: dict[str, list[MarketCandle]],
+    ) -> tuple[float, bool]:
+        if direction != Direction.SHORT or not self.strategy.enable_btc_eth_correlation_filter:
+            return 0.0, False
+        if len(execution_candles) < 8:
+            return 0.0, False
+        alt_window = execution_candles[-6:]
+        alt_return_pct = ((alt_window[-1].close - alt_window[0].open) / max(alt_window[0].open, 1e-9)) * 100.0
+        strongest_benchmark_score = 0.0
+        strongest_benchmark_return = 0.0
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            candles = benchmark_candles_5m.get(symbol, [])
+            if len(candles) < 8:
+                continue
+            window = candles[-6:]
+            benchmark_return_pct = ((window[-1].close - window[0].open) / max(window[0].open, 1e-9)) * 100.0
+            benchmark_atr = average_true_range(candles[-20:] or candles, period=14)
+            normalized_move = 0.0
+            if benchmark_atr > 0:
+                normalized_move = max(window[-1].close - window[0].open, 0.0) / benchmark_atr
+            squeeze_long = self._squeeze_score(window, Direction.LONG)
+            benchmark_score = 0.0
+            if benchmark_return_pct > 0:
+                benchmark_score = min(normalized_move / 1.8, 1.0) * 0.70 + min(squeeze_long, 1.0) * 0.30
+            else:
+                benchmark_score = min(squeeze_long, 1.0) * 0.20
+            strongest_benchmark_score = max(strongest_benchmark_score, benchmark_score)
+            strongest_benchmark_return = max(strongest_benchmark_return, benchmark_return_pct)
+        if strongest_benchmark_score <= 0:
+            return 0.0, False
+        relative_weakness = strongest_benchmark_return - alt_return_pct
+        support_score = min(max(relative_weakness, 0.0) / 1.5, 1.0)
+        headwind = strongest_benchmark_score >= self.strategy.btc_correlation_threshold and support_score < 0.35
+        return support_score, headwind
 
     def _follow_through_5m(self, candles_5m: list[MarketCandle], level: LevelCandidate, direction: Direction) -> bool:
         if len(candles_5m) < 2:
@@ -1004,6 +1164,7 @@ class RuleEngine:
             and coin.score >= 0.58
             and breakout.volume_z >= self.strategy.watchlist_volume_z_threshold
             and breakout.watch_flow_support
+            and not breakout.correlation_headwind
             and level.kind in {LevelKind.RESISTANCE, LevelKind.SUPPORT}
         )
 
@@ -1052,6 +1213,10 @@ class RuleEngine:
             )
         if not notes:
             notes.append("Сетап выглядит чисто и близок к actionable breakout scalp.")
+        if breakout.tick_velocity_ratio < max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15):
+            notes.append(f"Tick velocity is still soft: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline.")
+        if breakout.correlation_headwind:
+            notes.append("BTC/ETH benchmark flow is too strong for this alt short.")
         return notes
 
     def _classify(self, confidence: float) -> SignalClass:

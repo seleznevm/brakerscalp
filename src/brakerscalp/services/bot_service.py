@@ -485,6 +485,8 @@ class BotService:
 
     async def _build_alert_chart(self, signal_id: str) -> tuple[bytes | None, str | None]:
         signal = await self.repository.get_signal_by_decision_id(signal_id)
+        if signal is None and "#" in signal_id:
+            signal = await self.repository.get_signal_by_decision_id(signal_id.split("#", 1)[0])
         if signal is None:
             return None, None
         candles = await self.repository.get_candles_before(

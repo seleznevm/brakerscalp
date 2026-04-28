@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, SignalClass, TradeTick, UniverseSymbol, Venue
+from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, OrderFlowSnapshot, SignalClass, TradeTick, UniverseSymbol, Venue
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import ALERTS_TOTAL, SIGNALS_IN_DB, STALE_DATA_RATIO
 from brakerscalp.serialization import loads
@@ -103,6 +103,7 @@ class EngineService:
         stale = 0 if health.is_fresh else 1
         levels = self.level_detector.detect(symbol, symbol_config.primary_venue, candles_4h, candles_1h)
         await self.repository.replace_levels(symbol, primary_venue, levels)
+        order_flow_payload = await self.cache.get_order_flow_snapshot(primary_venue, symbol) if hasattr(self.cache, "get_order_flow_snapshot") else None
 
         cross_health = []
         for venue in Venue:
@@ -120,10 +121,12 @@ class EngineService:
                 candles_5m=candles_5m,
                 levels=levels,
                 trades=parse_model_list(await self.cache.get_trades(primary_venue, symbol), TradeTick),
+                order_flow=OrderFlowSnapshot.model_validate(order_flow_payload) if order_flow_payload else None,
                 book=BookSnapshot.model_validate(book_payload) if book_payload else None,
                 derivative_context=DerivativeContext.model_validate(derivatives_payload) if derivatives_payload else None,
                 health=health,
                 cross_venue_health=cross_health,
+                benchmark_candles_5m=await self._benchmark_candles_5m(symbol_config.primary_venue),
             )
         )
         if decision is None:
@@ -197,3 +200,14 @@ class EngineService:
     def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
         now = datetime.now(tz=timezone.utc)
         return [item for item in candles if item.close_time <= now]
+
+    async def _benchmark_candles_5m(self, venue: Venue) -> dict[str, list[MarketCandle]]:
+        benchmarks: dict[str, list[MarketCandle]] = {}
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            raw = await self.cache.get_candles(venue.value, symbol, "5m")
+            if not raw:
+                continue
+            candles = self._closed_candles(parse_model_list(raw, MarketCandle))
+            if candles:
+                benchmarks[symbol] = candles
+        return benchmarks

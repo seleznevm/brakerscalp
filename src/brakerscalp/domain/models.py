@@ -113,6 +113,19 @@ class TradeTick(BaseModel):
     side: Side
 
 
+class OrderFlowSnapshot(BaseModel):
+    symbol: str
+    venue: Venue
+    timestamp: datetime = Field(default_factory=utcnow)
+    delta_ratio: float = 0.0
+    cvd_slope: float = 0.0
+    tick_velocity: float = 0.0
+    baseline_tick_velocity: float = 0.0
+    tick_velocity_ratio: float = 0.0
+    recent_trade_count: int = 0
+    baseline_trade_count: int = 0
+
+
 class DerivativeContext(BaseModel):
     symbol: str
     venue: Venue

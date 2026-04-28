@@ -53,6 +53,17 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  orderflow:
+    build: .
+    env_file: [.env]
+    command: ["python", "-m", "brakerscalp.app.order_flow"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   bot:
     build: .
     env_file: [.env]

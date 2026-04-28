@@ -317,6 +317,17 @@ def build_api(
         watchlist_delta_ratio_threshold: float = Query(ge=0.0, le=1.0),
         cvd_slope_threshold: float = Query(ge=0.0, le=1.0),
         delta_divergence_threshold: float = Query(ge=0.0, le=1.0),
+        enable_btc_eth_correlation_filter: bool = Query(default=True),
+        btc_correlation_threshold: float = Query(default=0.45, ge=0.1, le=0.9),
+        enable_liquidation_levels: bool = Query(default=True),
+        enable_round_number_levels: bool = Query(default=True),
+        enable_tick_velocity_alerts: bool = Query(default=True),
+        tick_velocity_alert_multiplier: float = Query(default=1.8, ge=1.0, le=5.0),
+        enable_time_stop_alerts: bool = Query(default=True),
+        time_stop_minutes: int = Query(default=3, ge=1, le=15),
+        time_stop_min_move_pct: float = Query(default=1.0, ge=0.1, le=10.0),
+        enable_dynamic_breakeven_alerts: bool = Query(default=True),
+        breakeven_trigger_pct: float = Query(default=0.5, ge=0.1, le=10.0),
     ) -> RedirectResponse:
         config = StrategyRuntimeConfig(
             timeframe=timeframe,
@@ -337,6 +348,17 @@ def build_api(
             watchlist_delta_ratio_threshold=watchlist_delta_ratio_threshold,
             cvd_slope_threshold=cvd_slope_threshold,
             delta_divergence_threshold=delta_divergence_threshold,
+            enable_btc_eth_correlation_filter=enable_btc_eth_correlation_filter,
+            btc_correlation_threshold=btc_correlation_threshold,
+            enable_liquidation_levels=enable_liquidation_levels,
+            enable_round_number_levels=enable_round_number_levels,
+            enable_tick_velocity_alerts=enable_tick_velocity_alerts,
+            tick_velocity_alert_multiplier=tick_velocity_alert_multiplier,
+            enable_time_stop_alerts=enable_time_stop_alerts,
+            time_stop_minutes=time_stop_minutes,
+            time_stop_min_move_pct=time_stop_min_move_pct,
+            enable_dynamic_breakeven_alerts=enable_dynamic_breakeven_alerts,
+            breakeven_trigger_pct=breakeven_trigger_pct,
         )
         await cache.set_strategy_config(config.model_dump(mode="json"))
         return RedirectResponse(url="/settings?strategy_saved=applied", status_code=303)
@@ -576,6 +598,7 @@ def build_api(
                 "alert_message_thread_id": settings.alert_message_thread_id,
                 "poll_interval_seconds": settings.poll_interval_seconds,
                 "engine_interval_seconds": settings.engine_interval_seconds,
+                "order_flow_interval_seconds": settings.order_flow_interval_seconds,
                 "minimum_alert_confidence": settings.minimum_alert_confidence,
                 "runtime_minimum_alert_confidence": minimum_alert_confidence,
                 "risk_usdt": settings.risk_usdt,
@@ -726,7 +749,7 @@ async def _service_statuses(repository: Repository, cache: StateCache, settings:
                 "updated_at": now,
             }
         )
-    for service_name in ["collector", "engine", "bot"]:
+    for service_name in ["collector", "engine", "orderflow", "bot"]:
         heartbeat = await cache.get_service_heartbeat(service_name)
         statuses.append(_heartbeat_status(service_name, heartbeat, local_tz))
     return statuses
@@ -736,6 +759,7 @@ def _heartbeat_status(service_name: str, heartbeat: dict[str, Any] | None, local
     labels = {
         "collector": "Collector",
         "engine": "Engine",
+        "orderflow": "OrderFlow",
         "bot": "Bot",
     }
     if heartbeat is None:
@@ -1669,6 +1693,17 @@ STRATEGY_FIELD_HELP = {
     "watchlist_delta_ratio_threshold": "Directional delta ratio required for a watch setup before activation.",
     "cvd_slope_threshold": "Minimum directional CVD slope. Higher values require cumulative aggressive flow to build in the breakout direction.",
     "delta_divergence_threshold": "Opposite-side delta threshold that marks divergence risk and blocks lower-quality breakouts.",
+    "enable_btc_eth_correlation_filter": "Block weak alt shorts when BTC or ETH are squeezing or impulsing higher.",
+    "btc_correlation_threshold": "How strong BTC/ETH bullish pressure must be before the short filter activates. Lower is stricter.",
+    "enable_liquidation_levels": "Allow liquidation-cluster levels to participate in level selection and scoring.",
+    "enable_round_number_levels": "Allow round-number levels and round-number book density confluence in scoring.",
+    "enable_tick_velocity_alerts": "Enable tick-velocity breakout confirmation and separate velocity alerts.",
+    "tick_velocity_alert_multiplier": "How many times faster the tape must print versus the 10-minute baseline.",
+    "enable_time_stop_alerts": "Send a close-by-market alert when the breakout does not move fast enough after activation.",
+    "time_stop_minutes": "Minutes to wait before declaring the breakout too slow.",
+    "time_stop_min_move_pct": "Minimum favorable move, in percent, required to avoid the time-stop alert.",
+    "enable_dynamic_breakeven_alerts": "Send a breakeven alert after the first impulse reaches the configured profit threshold.",
+    "breakeven_trigger_pct": "Profit threshold, in percent, that triggers the breakeven alert.",
 }
 
 
@@ -1685,6 +1720,18 @@ def _strategy_input(name: str, label: str, value: str, *, tooltip: str, min_valu
     <label class="field-block">
       <span class="tooltip-anchor" data-tooltip="{escape(tooltip)}">{escape(label)}</span>
       <input type="number" name="{escape(name)}" value="{escape(value)}" {attr_text}>
+    </label>
+    """
+
+
+def _strategy_toggle(name: str, label: str, value: bool, *, tooltip: str) -> str:
+    return f"""
+    <label class="field-block">
+      <span class="tooltip-anchor" data-tooltip="{escape(tooltip)}">{escape(label)}</span>
+      <select name="{escape(name)}">
+        <option value="true" {'selected' if value else ''}>Enabled</option>
+        <option value="false" {'selected' if not value else ''}>Disabled</option>
+      </select>
     </label>
     """
 
@@ -1724,6 +1771,17 @@ def _runtime_settings_form(
         _strategy_input('watchlist_delta_ratio_threshold', 'watchlist_delta_ratio_threshold', f'{strategy_config.watchlist_delta_ratio_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['watchlist_delta_ratio_threshold'], min_value='0', max_value='1', step='0.01'),
         _strategy_input('cvd_slope_threshold', 'cvd_slope_threshold', f'{strategy_config.cvd_slope_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['cvd_slope_threshold'], min_value='0', max_value='1', step='0.01'),
         _strategy_input('delta_divergence_threshold', 'delta_divergence_threshold', f'{strategy_config.delta_divergence_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['delta_divergence_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_toggle('enable_btc_eth_correlation_filter', 'enable_btc_eth_correlation_filter', strategy_config.enable_btc_eth_correlation_filter, tooltip=STRATEGY_FIELD_HELP['enable_btc_eth_correlation_filter']),
+        _strategy_input('btc_correlation_threshold', 'btc_correlation_threshold', f'{strategy_config.btc_correlation_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['btc_correlation_threshold'], min_value='0.1', max_value='0.9', step='0.01'),
+        _strategy_toggle('enable_liquidation_levels', 'enable_liquidation_levels', strategy_config.enable_liquidation_levels, tooltip=STRATEGY_FIELD_HELP['enable_liquidation_levels']),
+        _strategy_toggle('enable_round_number_levels', 'enable_round_number_levels', strategy_config.enable_round_number_levels, tooltip=STRATEGY_FIELD_HELP['enable_round_number_levels']),
+        _strategy_toggle('enable_tick_velocity_alerts', 'enable_tick_velocity_alerts', strategy_config.enable_tick_velocity_alerts, tooltip=STRATEGY_FIELD_HELP['enable_tick_velocity_alerts']),
+        _strategy_input('tick_velocity_alert_multiplier', 'tick_velocity_alert_multiplier', f'{strategy_config.tick_velocity_alert_multiplier:.2f}', tooltip=STRATEGY_FIELD_HELP['tick_velocity_alert_multiplier'], min_value='1.0', max_value='5.0', step='0.05'),
+        _strategy_toggle('enable_time_stop_alerts', 'enable_time_stop_alerts', strategy_config.enable_time_stop_alerts, tooltip=STRATEGY_FIELD_HELP['enable_time_stop_alerts']),
+        _strategy_input('time_stop_minutes', 'time_stop_minutes', str(strategy_config.time_stop_minutes), tooltip=STRATEGY_FIELD_HELP['time_stop_minutes'], min_value='1', max_value='15', step='1'),
+        _strategy_input('time_stop_min_move_pct', 'time_stop_min_move_pct', f'{strategy_config.time_stop_min_move_pct:.2f}', tooltip=STRATEGY_FIELD_HELP['time_stop_min_move_pct'], min_value='0.1', max_value='10', step='0.1'),
+        _strategy_toggle('enable_dynamic_breakeven_alerts', 'enable_dynamic_breakeven_alerts', strategy_config.enable_dynamic_breakeven_alerts, tooltip=STRATEGY_FIELD_HELP['enable_dynamic_breakeven_alerts']),
+        _strategy_input('breakeven_trigger_pct', 'breakeven_trigger_pct', f'{strategy_config.breakeven_trigger_pct:.2f}', tooltip=STRATEGY_FIELD_HELP['breakeven_trigger_pct'], min_value='0.1', max_value='10', step='0.1'),
     ])
     return f"""
     <div class="scan-card">

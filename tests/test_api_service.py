@@ -498,15 +498,16 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
             breakout_distance_atr=0.18,
             body_ratio=0.6,
             follow_through_5m=True,
-            book_imbalance=0.12,
-            delta_ratio=0.18,
-            cvd_slope=0.11,
-            delta_divergence=False,
-            freshness_ms=200,
-            spread_ratio=1.0,
-            notes=["Active breakout pressure"],
-            updated_at=datetime.now(tz=timezone.utc),
-        ),
+                book_imbalance=0.12,
+                delta_ratio=0.18,
+                cvd_slope=0.11,
+                delta_divergence=False,
+                tick_velocity_ratio=2.1,
+                freshness_ms=200,
+                spread_ratio=1.0,
+                notes=["Active breakout pressure"],
+                updated_at=datetime.now(tz=timezone.utc),
+            ),
         ScreeningResult(
             symbol="ETHUSDT",
             venue=Venue.BINANCE,
@@ -536,14 +537,15 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
             breakout_distance_atr=0.05,
             body_ratio=0.5,
             follow_through_5m=False,
-            book_imbalance=-0.08,
-            delta_ratio=-0.09,
-            cvd_slope=-0.06,
-            delta_divergence=False,
-            freshness_ms=120,
-            spread_ratio=1.1,
-            notes=["Near level"],
-            updated_at=datetime.now(tz=timezone.utc),
+                book_imbalance=-0.08,
+                delta_ratio=-0.09,
+                cvd_slope=-0.06,
+                delta_divergence=False,
+                tick_velocity_ratio=1.3,
+                freshness_ms=120,
+                spread_ratio=1.1,
+                notes=["Near level"],
+                updated_at=datetime.now(tz=timezone.utc),
         ),
     ]
     with patch("brakerscalp.services.api_service.MarketInspector.screen_universe", new=AsyncMock(return_value=fake_rows)):
@@ -593,6 +595,17 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
             "&watchlist_delta_ratio_threshold=0.05"
             "&cvd_slope_threshold=0.08"
             "&delta_divergence_threshold=0.07"
+            "&enable_btc_eth_correlation_filter=false"
+            "&btc_correlation_threshold=0.55"
+            "&enable_liquidation_levels=false"
+            "&enable_round_number_levels=false"
+            "&enable_tick_velocity_alerts=true"
+            "&tick_velocity_alert_multiplier=2.25"
+            "&enable_time_stop_alerts=true"
+            "&time_stop_minutes=4"
+            "&time_stop_min_move_pct=1.2"
+            "&enable_dynamic_breakeven_alerts=false"
+            "&breakeven_trigger_pct=0.75"
         )
         applied = await cache.get_strategy_config(default=settings.default_strategy_config())
         defaults_response = await client.get("/settings/strategy-defaults")
@@ -604,6 +617,11 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
     assert applied["volume_z_threshold"] == 2.15
     assert applied["min_touches"] == 4
     assert applied["delta_ratio_threshold"] == 0.16
+    assert applied["enable_btc_eth_correlation_filter"] is False
+    assert applied["btc_correlation_threshold"] == 0.55
+    assert applied["tick_velocity_alert_multiplier"] == 2.25
+    assert applied["time_stop_minutes"] == 4
+    assert applied["enable_dynamic_breakeven_alerts"] is False
     assert defaults_response.status_code == 303
     assert defaults_response.headers["location"] == "/settings?strategy_saved=defaults"
     assert restored["timeframe"] == settings.default_strategy_config()["timeframe"]

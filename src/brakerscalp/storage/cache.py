@@ -5,8 +5,9 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from brakerscalp.domain.models import AlertMessage, BookSnapshot, DataHealth, DerivativeContext, MarketCandle, TradeTick, UniverseSymbol
+from brakerscalp.domain.models import AlertMessage, BookSnapshot, DataHealth, DerivativeContext, MarketCandle, OrderFlowSnapshot, TradeTick, UniverseSymbol
 from brakerscalp.serialization import dumps, loads
+from brakerscalp.signals.orderflow import merge_trade_history
 
 
 class StateCache:
@@ -52,9 +53,23 @@ class StateCache:
 
     async def store_trades(self, venue: str, symbol: str, trades: list[TradeTick]) -> None:
         await self.set_json(self._key("trades", venue, symbol), [item.model_dump(mode="json") for item in trades], ex=600)
+        history_key = self._key("trades-history", venue, symbol)
+        existing_raw = await self.get_json(history_key) or []
+        existing = [TradeTick.model_validate(item) for item in existing_raw]
+        merged = merge_trade_history(existing, trades)
+        await self.set_json(history_key, [item.model_dump(mode="json") for item in merged], ex=1800)
 
     async def get_trades(self, venue: str, symbol: str) -> list[dict]:
         return await self.get_json(self._key("trades", venue, symbol)) or []
+
+    async def get_trade_history(self, venue: str, symbol: str) -> list[dict]:
+        return await self.get_json(self._key("trades-history", venue, symbol)) or []
+
+    async def store_order_flow_snapshot(self, venue: str, symbol: str, snapshot: OrderFlowSnapshot) -> None:
+        await self.set_json(self._key("orderflow", venue, symbol), snapshot.model_dump(mode="json"), ex=600)
+
+    async def get_order_flow_snapshot(self, venue: str, symbol: str) -> dict | None:
+        return await self.get_json(self._key("orderflow", venue, symbol))
 
     async def store_health(self, venue: str, symbol: str, health: DataHealth) -> None:
         await self.set_json(self._key("health", venue, symbol), health.model_dump(mode="json"), ex=600)

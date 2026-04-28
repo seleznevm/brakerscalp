@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from brakerscalp.config import Settings
-from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, Direction, MarketCandle, Timeframe, TradeTick, UniverseSymbol, Venue
+from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, Direction, MarketCandle, OrderFlowSnapshot, Timeframe, TradeTick, UniverseSymbol, Venue
 from brakerscalp.exchanges.base import ExchangeAdapter
 from brakerscalp.services.daily_summary import (
     SetupLifecycle,
@@ -16,6 +16,7 @@ from brakerscalp.services.daily_summary import (
 from brakerscalp.signals.charting import render_signal_chart
 from brakerscalp.signals.engine import EngineInput, RuleEngine, ScreeningResult, StrategyRuntimeConfig
 from brakerscalp.signals.levels import LevelDetector
+from brakerscalp.signals.orderflow import compute_order_flow_snapshot
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.models import CandleRecord, SignalRecord
 from brakerscalp.storage.repository import Repository
@@ -444,10 +445,16 @@ class MarketInspector:
             candles_5m=candles_5m,
             levels=levels,
             trades=self._parse_model_list(await self.cache.get_trades(venue, symbol), TradeTick),
+            order_flow=(
+                self._parse_model(await self.cache.get_order_flow_snapshot(venue, symbol), OrderFlowSnapshot)
+                if hasattr(self.cache, "get_order_flow_snapshot")
+                else None
+            ),
             book=BookSnapshot.model_validate(book_payload) if book_payload else None,
             derivative_context=DerivativeContext.model_validate(derivatives_payload) if derivatives_payload else None,
             health=DataHealth.model_validate(health_payload),
             cross_venue_health=cross_health,
+            benchmark_candles_5m=await self._benchmark_candles_5m(symbol_config.primary_venue),
         )
 
     async def _load_live_payload(self, symbol: str, venue: Venue, adapter: ExchangeAdapter) -> EngineInput:
@@ -469,10 +476,12 @@ class MarketInspector:
             candles_5m=candles_5m,
             levels=levels,
             trades=trades,
+            order_flow=compute_order_flow_snapshot(symbol, venue, trades),
             book=book,
             derivative_context=derivatives,
             health=health,
             cross_venue_health=[],
+            benchmark_candles_5m=await self._live_benchmark_candles_5m(venue, adapter),
         )
 
     def _closed_candles(self, candles: list[MarketCandle]) -> list[MarketCandle]:
@@ -481,6 +490,29 @@ class MarketInspector:
 
     def _parse_model_list(self, raw: list[dict], model):
         return [model.model_validate(item) for item in raw]
+
+    def _parse_model(self, raw: dict | None, model):
+        if not raw:
+            return None
+        return model.model_validate(raw)
+
+    async def _benchmark_candles_5m(self, venue: Venue) -> dict[str, list[MarketCandle]]:
+        benchmarks: dict[str, list[MarketCandle]] = {}
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            raw = await self.cache.get_candles(venue.value, symbol, "5m")
+            candles = self._closed_candles(self._parse_model_list(raw, MarketCandle))
+            if candles:
+                benchmarks[symbol] = candles
+        return benchmarks
+
+    async def _live_benchmark_candles_5m(self, venue: Venue, adapter: ExchangeAdapter) -> dict[str, list[MarketCandle]]:
+        benchmarks: dict[str, list[MarketCandle]] = {}
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            try:
+                benchmarks[symbol] = self._closed_candles(await adapter.fetch_recent_candles(symbol, Timeframe.M5, 60))
+            except Exception:
+                continue
+        return benchmarks
 
     def _group_signals_by_setup(self, signals: list[SignalRecord]) -> dict[str, list[SignalRecord]]:
         grouped: dict[str, list[SignalRecord]] = defaultdict(list)

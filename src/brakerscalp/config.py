@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 30
     collector_symbol_concurrency: int = 6
     engine_interval_seconds: int = 20
+    order_flow_interval_seconds: int = 5
     signal_duplicate_window_minutes: int = 180
     minimum_alert_confidence: float = 65.0
     risk_usdt: float = 25.0
@@ -62,6 +63,17 @@ class Settings(BaseSettings):
     strategy_watchlist_delta_ratio_threshold: float = 0.04
     strategy_cvd_slope_threshold: float = 0.06
     strategy_delta_divergence_threshold: float = 0.08
+    strategy_enable_btc_eth_correlation_filter: bool = True
+    strategy_btc_correlation_threshold: float = 0.45
+    strategy_enable_liquidation_levels: bool = True
+    strategy_enable_round_number_levels: bool = True
+    strategy_enable_tick_velocity_alerts: bool = True
+    strategy_tick_velocity_alert_multiplier: float = 1.8
+    strategy_enable_time_stop_alerts: bool = True
+    strategy_time_stop_minutes: int = 3
+    strategy_time_stop_min_move_pct: float = 1.0
+    strategy_enable_dynamic_breakeven_alerts: bool = True
+    strategy_breakeven_trigger_pct: float = 0.5
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     exchange_request_timeout_seconds: float = 10.0
@@ -155,6 +167,17 @@ class Settings(BaseSettings):
             "watchlist_delta_ratio_threshold": self.strategy_watchlist_delta_ratio_threshold,
             "cvd_slope_threshold": self.strategy_cvd_slope_threshold,
             "delta_divergence_threshold": self.strategy_delta_divergence_threshold,
+            "enable_btc_eth_correlation_filter": self.strategy_enable_btc_eth_correlation_filter,
+            "btc_correlation_threshold": self.strategy_btc_correlation_threshold,
+            "enable_liquidation_levels": self.strategy_enable_liquidation_levels,
+            "enable_round_number_levels": self.strategy_enable_round_number_levels,
+            "enable_tick_velocity_alerts": self.strategy_enable_tick_velocity_alerts,
+            "tick_velocity_alert_multiplier": self.strategy_tick_velocity_alert_multiplier,
+            "enable_time_stop_alerts": self.strategy_enable_time_stop_alerts,
+            "time_stop_minutes": self.strategy_time_stop_minutes,
+            "time_stop_min_move_pct": self.strategy_time_stop_min_move_pct,
+            "enable_dynamic_breakeven_alerts": self.strategy_enable_dynamic_breakeven_alerts,
+            "breakeven_trigger_pct": self.strategy_breakeven_trigger_pct,
         }
 
 
