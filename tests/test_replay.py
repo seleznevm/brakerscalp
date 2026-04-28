@@ -5,7 +5,7 @@ from brakerscalp.signals.engine import EngineInput, RuleEngine
 from brakerscalp.signals.levels import LevelDetector
 
 
-def test_replay_signal_metrics_shape(make_candles, make_book, make_derivatives, make_health) -> None:
+def test_replay_signal_metrics_shape(make_candles, make_book, make_derivatives, make_health, make_trades) -> None:
     candles_4h = make_candles(timeframe=Timeframe.H4, count=40, step=45)
     candles_1h = make_candles(timeframe=Timeframe.H1, count=240, step=15)
     candles_15m = make_candles(timeframe=Timeframe.M15, count=100, step=9)
@@ -24,6 +24,7 @@ def test_replay_signal_metrics_shape(make_candles, make_book, make_derivatives, 
                 candles_15m=window,
                 candles_5m=candles_5m[: index + 1],
                 levels=levels,
+                trades=make_trades(start_price=window[-1].close - 40.0),
                 book=make_book(mid=window[-1].close),
                 derivative_context=make_derivatives(),
                 health=make_health(),

@@ -7,7 +7,7 @@ from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.signals.rendering import render_chart_caption, render_signal
 
 
-def test_render_signal_contains_required_sections(make_breakout_market, make_book, make_derivatives, make_health) -> None:
+def test_render_signal_contains_required_sections(make_breakout_market, make_book, make_derivatives, make_health, make_trades) -> None:
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
     levels = LevelDetector().detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
     decision = RuleEngine().evaluate(
@@ -19,6 +19,7 @@ def test_render_signal_contains_required_sections(make_breakout_market, make_boo
             candles_15m=candles_15m,
             candles_5m=candles_5m,
             levels=levels,
+            trades=make_trades(start_price=candles_5m[-1].close - 60.0),
             book=make_book(),
             derivative_context=make_derivatives(),
             health=make_health(),
@@ -40,7 +41,7 @@ def test_render_signal_contains_required_sections(make_breakout_market, make_boo
     assert chart.startswith(b"\x89PNG")
 
 
-def test_render_signal_marks_activated_setups(make_breakout_market, make_book, make_derivatives, make_health) -> None:
+def test_render_signal_marks_activated_setups(make_breakout_market, make_book, make_derivatives, make_health, make_trades) -> None:
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
     levels = LevelDetector().detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
     decision = RuleEngine().evaluate(
@@ -52,6 +53,7 @@ def test_render_signal_marks_activated_setups(make_breakout_market, make_book, m
             candles_15m=candles_15m,
             candles_5m=candles_5m,
             levels=levels,
+            trades=make_trades(start_price=candles_5m[-1].close - 60.0),
             book=make_book(),
             derivative_context=make_derivatives(),
             health=make_health(),

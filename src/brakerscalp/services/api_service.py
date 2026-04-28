@@ -313,6 +313,10 @@ def build_api(
         close_to_extreme_threshold: float = Query(ge=0.0, le=1.0),
         range_expansion_threshold: float = Query(ge=0.0, le=10.0),
         sl_multiplier: float = Query(ge=0.01, le=5.0),
+        delta_ratio_threshold: float = Query(ge=0.0, le=1.0),
+        watchlist_delta_ratio_threshold: float = Query(ge=0.0, le=1.0),
+        cvd_slope_threshold: float = Query(ge=0.0, le=1.0),
+        delta_divergence_threshold: float = Query(ge=0.0, le=1.0),
     ) -> RedirectResponse:
         config = StrategyRuntimeConfig(
             timeframe=timeframe,
@@ -329,6 +333,10 @@ def build_api(
             close_to_extreme_threshold=close_to_extreme_threshold,
             range_expansion_threshold=range_expansion_threshold,
             sl_multiplier=sl_multiplier,
+            delta_ratio_threshold=delta_ratio_threshold,
+            watchlist_delta_ratio_threshold=watchlist_delta_ratio_threshold,
+            cvd_slope_threshold=cvd_slope_threshold,
+            delta_divergence_threshold=delta_divergence_threshold,
         )
         await cache.set_strategy_config(config.model_dump(mode="json"))
         return RedirectResponse(url="/settings?strategy_saved=applied", status_code=303)
@@ -342,12 +350,9 @@ def build_api(
     async def add_universe_symbol(symbol: str, venue: str) -> RedirectResponse:
         normalized = inspector.normalize_symbol(symbol)
         selected_venue = Venue(venue.lower())
-        current = await inspector.list_universe()
-        updated_map = {item.symbol.upper(): item for item in current}
         new_item = UniverseSymbol(symbol=normalized, primary_venue=selected_venue)
-        updated_map[normalized] = new_item
-        updated = sorted(updated_map.values(), key=lambda item: (item.primary_venue.value, item.symbol))
         await repository.upsert_runtime_universe_symbol(new_item)
+        updated = await repository.list_runtime_universe(enabled_venues=settings.enabled_venues)
         await cache.store_universe(updated)
         save_universe(settings.universe_path, updated)
         return RedirectResponse(url=f"/settings?manage_symbol={quote_plus(normalized)}&universe_saved=added", status_code=303)
@@ -355,9 +360,8 @@ def build_api(
     @app.get("/settings/universe/remove")
     async def remove_universe_symbol(symbol: str) -> RedirectResponse:
         normalized = inspector.normalize_symbol(symbol)
-        current = await inspector.list_universe()
-        updated = [item for item in current if item.symbol.upper() != normalized.upper()]
         await repository.remove_runtime_universe_symbol(normalized)
+        updated = await repository.list_runtime_universe(enabled_venues=settings.enabled_venues)
         await cache.store_universe(updated)
         save_universe(settings.universe_path, updated)
         return RedirectResponse(url=f"/settings?manage_symbol={quote_plus(normalized)}&universe_saved=removed", status_code=303)
@@ -1153,17 +1157,29 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
     }}
     .strategy-form {{
       align-items: flex-start;
+      gap: 10px;
     }}
     .field-block {{
       display: flex;
-      flex: 1 1 220px;
-      min-width: 220px;
+      flex: 1 1 178px;
+      min-width: 178px;
       flex-direction: column;
-      gap: 8px;
+      gap: 4px;
     }}
     .field-block input,
     .field-block select {{
       min-width: 0;
+    }}
+    .strategy-form .field-block input,
+    .strategy-form .field-block select {{
+      min-height: 38px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      font-size: 0.95rem;
+    }}
+    .strategy-form .field-block span {{
+      font-size: 0.82rem;
+      line-height: 1.2;
     }}
     .sort-link {{
       color: inherit;
@@ -1649,6 +1665,10 @@ STRATEGY_FIELD_HELP = {
     "close_to_extreme_threshold": "How close the candle must close to its extreme. Lower values mean stronger impulse candles.",
     "range_expansion_threshold": "Required range expansion versus recent candles. Higher means more explosive breakouts only.",
     "sl_multiplier": "ATR floor used in stop-distance calculation. Higher values widen the minimum stop and reduce position size.",
+    "delta_ratio_threshold": "Minimum directional delta ratio for an activated breakout. Higher values require clearer aggressive buyers or sellers.",
+    "watchlist_delta_ratio_threshold": "Directional delta ratio required for a watch setup before activation.",
+    "cvd_slope_threshold": "Minimum directional CVD slope. Higher values require cumulative aggressive flow to build in the breakout direction.",
+    "delta_divergence_threshold": "Opposite-side delta threshold that marks divergence risk and blocks lower-quality breakouts.",
 }
 
 
@@ -1700,6 +1720,10 @@ def _runtime_settings_form(
         _strategy_input('close_to_extreme_threshold', 'close_to_extreme_threshold', f'{strategy_config.close_to_extreme_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['close_to_extreme_threshold'], min_value='0', max_value='1', step='0.01'),
         _strategy_input('range_expansion_threshold', 'range_expansion_threshold', f'{strategy_config.range_expansion_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['range_expansion_threshold'], min_value='0', max_value='10', step='0.05'),
         _strategy_input('sl_multiplier', 'sl_multiplier', f'{strategy_config.sl_multiplier:.2f}', tooltip=STRATEGY_FIELD_HELP['sl_multiplier'], min_value='0.01', max_value='5', step='0.01'),
+        _strategy_input('delta_ratio_threshold', 'delta_ratio_threshold', f'{strategy_config.delta_ratio_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['delta_ratio_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_input('watchlist_delta_ratio_threshold', 'watchlist_delta_ratio_threshold', f'{strategy_config.watchlist_delta_ratio_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['watchlist_delta_ratio_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_input('cvd_slope_threshold', 'cvd_slope_threshold', f'{strategy_config.cvd_slope_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['cvd_slope_threshold'], min_value='0', max_value='1', step='0.01'),
+        _strategy_input('delta_divergence_threshold', 'delta_divergence_threshold', f'{strategy_config.delta_divergence_threshold:.2f}', tooltip=STRATEGY_FIELD_HELP['delta_divergence_threshold'], min_value='0', max_value='1', step='0.01'),
     ])
     return f"""
     <div class="scan-card">

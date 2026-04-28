@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     strategy_close_to_extreme_threshold: float = 0.22
     strategy_range_expansion_threshold: float = 1.25
     strategy_sl_multiplier: float = 0.22
+    strategy_delta_ratio_threshold: float = 0.12
+    strategy_watchlist_delta_ratio_threshold: float = 0.04
+    strategy_cvd_slope_threshold: float = 0.06
+    strategy_delta_divergence_threshold: float = 0.08
     api_host: str = "0.0.0.0"
     api_port: int = 8080
     exchange_request_timeout_seconds: float = 10.0
@@ -147,6 +151,10 @@ class Settings(BaseSettings):
             "close_to_extreme_threshold": self.strategy_close_to_extreme_threshold,
             "range_expansion_threshold": self.strategy_range_expansion_threshold,
             "sl_multiplier": self.strategy_sl_multiplier,
+            "delta_ratio_threshold": self.strategy_delta_ratio_threshold,
+            "watchlist_delta_ratio_threshold": self.strategy_watchlist_delta_ratio_threshold,
+            "cvd_slope_threshold": self.strategy_cvd_slope_threshold,
+            "delta_divergence_threshold": self.strategy_delta_divergence_threshold,
         }
 
 

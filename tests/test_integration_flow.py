@@ -4,7 +4,7 @@ from brakerscalp.domain.models import Timeframe, UniverseSymbol, Venue
 from brakerscalp.services.engine_service import EngineService
 
 
-async def test_engine_generates_alert(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+async def test_engine_generates_alert(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
 
@@ -13,6 +13,7 @@ async def test_engine_generates_alert(repository, cache, make_breakout_market, m
     await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
     await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
     await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_trades("binance", "BTCUSDT", make_trades(start_price=candles_5m[-1].close - 60.0))
     await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
     await cache.store_health("binance", "BTCUSDT", make_health())
     await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
@@ -27,7 +28,7 @@ async def test_engine_generates_alert(repository, cache, make_breakout_market, m
     assert queued.chat_id == 123
 
 
-async def test_engine_filters_unclosed_candle(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+async def test_engine_filters_unclosed_candle(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
     from datetime import datetime, timedelta, timezone
 
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
@@ -39,6 +40,7 @@ async def test_engine_filters_unclosed_candle(repository, cache, make_breakout_m
     await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
     await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
     await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_trades("binance", "BTCUSDT", make_trades(start_price=candles_5m[-1].close - 60.0))
     await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
     await cache.store_health("binance", "BTCUSDT", make_health())
     await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
@@ -50,7 +52,7 @@ async def test_engine_filters_unclosed_candle(repository, cache, make_breakout_m
     assert all(item.close_time <= datetime.now(tz=timezone.utc) for item in closed)
 
 
-async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
 
@@ -59,6 +61,7 @@ async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakou
     await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
     await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
     await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_trades("binance", "BTCUSDT", make_trades(start_price=candles_5m[-1].close - 60.0))
     await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
     await cache.store_health("binance", "BTCUSDT", make_health())
     await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
@@ -74,7 +77,7 @@ async def test_engine_suppresses_duplicate_setup(repository, cache, make_breakou
     assert second_alert is None
 
 
-async def test_engine_respects_runtime_minimum_alert_confidence(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+async def test_engine_respects_runtime_minimum_alert_confidence(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
     universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
 
@@ -83,6 +86,7 @@ async def test_engine_respects_runtime_minimum_alert_confidence(repository, cach
     await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
     await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
     await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_trades("binance", "BTCUSDT", make_trades(start_price=candles_5m[-1].close - 60.0))
     await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
     await cache.store_health("binance", "BTCUSDT", make_health())
     await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
@@ -97,7 +101,7 @@ async def test_engine_respects_runtime_minimum_alert_confidence(repository, cach
     assert queued is None
 
 
-async def test_engine_uses_runtime_universe_from_cache(repository, cache, make_breakout_market, make_book, make_health, make_derivatives) -> None:
+async def test_engine_uses_runtime_universe_from_cache(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
     constructor_universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
     runtime_universe = [UniverseSymbol(symbol="ETHUSDT", primary_venue=Venue.BINANCE)]
     candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market(symbol="ETHUSDT")
@@ -108,6 +112,7 @@ async def test_engine_uses_runtime_universe_from_cache(repository, cache, make_b
     await cache.store_candles("binance", "ETHUSDT", "15m", candles_15m)
     await cache.store_candles("binance", "ETHUSDT", "5m", candles_5m)
     await cache.store_book("binance", "ETHUSDT", make_book(symbol="ETHUSDT"))
+    await cache.store_trades("binance", "ETHUSDT", make_trades(symbol="ETHUSDT", start_price=candles_5m[-1].close - 60.0))
     await cache.store_derivative_context("binance", "ETHUSDT", make_derivatives(symbol="ETHUSDT"))
     await cache.store_health("binance", "ETHUSDT", make_health(symbol="ETHUSDT"))
     await cache.store_health("bybit", "ETHUSDT", make_health(symbol="ETHUSDT", venue=Venue.BYBIT))

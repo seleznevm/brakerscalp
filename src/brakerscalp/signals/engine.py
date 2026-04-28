@@ -17,6 +17,7 @@ from brakerscalp.domain.models import (
     SetupType,
     SignalClass,
     SignalDecision,
+    TradeTick,
     Timeframe,
     Venue,
 )
@@ -38,6 +39,10 @@ class StrategyRuntimeConfig(BaseModel):
     close_to_extreme_threshold: float = 0.22
     range_expansion_threshold: float = 1.25
     sl_multiplier: float = 0.22
+    delta_ratio_threshold: float = 0.12
+    watchlist_delta_ratio_threshold: float = 0.04
+    cvd_slope_threshold: float = 0.06
+    delta_divergence_threshold: float = 0.08
 
 
 @dataclass(slots=True)
@@ -49,6 +54,7 @@ class EngineInput:
     candles_15m: list[MarketCandle]
     candles_5m: list[MarketCandle]
     levels: list[LevelCandidate]
+    trades: list[TradeTick]
     book: BookSnapshot | None
     derivative_context: DerivativeContext | None
     health: DataHealth
@@ -103,6 +109,13 @@ class BreakoutState:
     data_ok: bool
     spread_ratio: float
     cross_ok: bool
+    delta_ratio: float
+    directional_delta_ratio: float
+    cvd_slope: float
+    directional_cvd_slope: float
+    delta_divergence: bool
+    aggressive_flow_support: bool
+    watch_flow_support: bool
 
 
 @dataclass(slots=True)
@@ -136,6 +149,9 @@ class ScreeningResult:
     body_ratio: float
     follow_through_5m: bool
     book_imbalance: float
+    delta_ratio: float
+    cvd_slope: float
+    delta_divergence: bool
     freshness_ms: int
     spread_ratio: float
     notes: list[str]
@@ -216,6 +232,7 @@ class RuleEngine:
                 level=level,
                 atr_execution=execution_atr,
                 direction=direction,
+                trades=payload.trades,
                 book=payload.book,
                 health=payload.health,
                 cross_venue_health=payload.cross_venue_health,
@@ -299,6 +316,9 @@ class RuleEngine:
             body_ratio=breakout.body_ratio,
             follow_through_5m=breakout.follow_through_5m,
             book_imbalance=breakout.book_imbalance,
+            delta_ratio=breakout.delta_ratio,
+            cvd_slope=breakout.cvd_slope,
+            delta_divergence=breakout.delta_divergence,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=breakout.spread_ratio,
             notes=notes,
@@ -346,6 +366,9 @@ class RuleEngine:
             body_ratio=0.0,
             follow_through_5m=False,
             book_imbalance=0.0,
+            delta_ratio=0.0,
+            cvd_slope=0.0,
+            delta_divergence=False,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=payload.health.spread_ratio,
             notes=notes,
@@ -506,6 +529,7 @@ class RuleEngine:
         level: LevelCandidate,
         atr_execution: float,
         direction: Direction,
+        trades: list[TradeTick],
         book: BookSnapshot | None,
         health: DataHealth,
         cross_venue_health: list[DataHealth],
@@ -520,6 +544,21 @@ class RuleEngine:
         fresh_cross = [item for item in cross_venue_health if item.venue != health.venue and item.is_fresh]
         cross_ok = True if not cross_venue_health else len(fresh_cross) >= 1
         data_ok = health.is_fresh and not health.has_sequence_gap and spread_ratio <= 3.5
+        delta_ratio, directional_delta_ratio, cvd_slope, directional_cvd_slope, delta_divergence = self._trade_flow_metrics(
+            trades=trades,
+            execution_candles=execution_candles,
+            direction=direction,
+        )
+        aggressive_flow_support = (
+            directional_delta_ratio >= self.strategy.delta_ratio_threshold
+            and directional_cvd_slope >= self.strategy.cvd_slope_threshold
+            and not delta_divergence
+        )
+        watch_flow_support = (
+            directional_delta_ratio >= self.strategy.watchlist_delta_ratio_threshold
+            and directional_cvd_slope >= -(self.strategy.cvd_slope_threshold * 0.35)
+            and not delta_divergence
+        )
 
         if direction == Direction.LONG:
             breakout_distance_atr = (current.close - level.upper_price) / max(atr_execution, 1e-9)
@@ -541,6 +580,7 @@ class RuleEngine:
             and follow_through_5m
             and book_support
             and cross_ok
+            and aggressive_flow_support
         )
         score = min(
             1.0,
@@ -549,7 +589,8 @@ class RuleEngine:
             + min(max(volume_z, 0.0) / 3.0, 1.0) * 0.20
             + min(range_expansion / 1.8, 1.0) * 0.12
             + (0.10 if follow_through_5m else 0.0)
-            + (0.06 if book_support else 0.0),
+            + (0.06 if book_support else 0.0)
+            + (0.08 if aggressive_flow_support else 0.0),
         )
         return BreakoutState(
             signal_ready=signal_ready,
@@ -564,6 +605,13 @@ class RuleEngine:
             data_ok=data_ok,
             spread_ratio=spread_ratio,
             cross_ok=cross_ok,
+            delta_ratio=delta_ratio,
+            directional_delta_ratio=directional_delta_ratio,
+            cvd_slope=cvd_slope,
+            directional_cvd_slope=directional_cvd_slope,
+            delta_divergence=delta_divergence,
+            aggressive_flow_support=aggressive_flow_support,
+            watch_flow_support=watch_flow_support,
         )
 
     def _score_candidate(
@@ -655,6 +703,12 @@ class RuleEngine:
             why_not_higher.append("Нет уверенного follow-through на 5m после закрытия breakout-свечи.")
         if not breakout.cross_ok:
             why_not_higher.append("Кросс-биржевое подтверждение слабее, чем хотелось бы.")
+        if breakout.delta_divergence:
+            why_not_higher.append("Delta / CVD show divergence against the breakout direction.")
+        elif not breakout.aggressive_flow_support:
+            why_not_higher.append(
+                f"Aggressive flow is still weak: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}."
+            )
         if expected_rr < 2.4:
             why_not_higher.append(f"Expected R:R remains close to the minimum threshold: {expected_rr:.2f}.")
         if not why_not_higher:
@@ -671,6 +725,7 @@ class RuleEngine:
                 if confirmed_breakout
                 else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
             ),
+            f"Delta / CVD: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}, divergence {'yes' if breakout.delta_divergence else 'no'}.",
         ]
         if payload.derivative_context is not None:
             rationale.append(
@@ -740,6 +795,9 @@ class RuleEngine:
                 "book_imbalance": breakout.book_imbalance,
                 "spread_ratio": breakout.spread_ratio,
                 "confirmed_breakout": confirmed_breakout,
+                "delta_ratio": breakout.delta_ratio,
+                "cvd_slope": breakout.cvd_slope,
+                "delta_divergence": breakout.delta_divergence,
             },
             render_context=render_context,
         )
@@ -813,6 +871,40 @@ class RuleEngine:
             return all(item.close >= level.upper_price for item in candles_5m[-2:])
         return all(item.close <= level.lower_price for item in candles_5m[-2:])
 
+    def _trade_flow_metrics(
+        self,
+        *,
+        trades: list[TradeTick],
+        execution_candles: list[MarketCandle],
+        direction: Direction,
+    ) -> tuple[float, float, float, float, bool]:
+        if not trades:
+            return 0.0, 0.0, 0.0, 0.0, False
+        ordered = sorted(trades, key=lambda item: item.timestamp)[-80:]
+        signed_notionals: list[float] = []
+        running_cvd = 0.0
+        cvd_points: list[float] = []
+        for trade in ordered:
+            notional = max(trade.size * trade.price, 0.0)
+            signed = notional if trade.side.value == "buy" else -notional
+            signed_notionals.append(signed)
+            running_cvd += signed
+            cvd_points.append(running_cvd)
+        total_notional = sum(abs(item) for item in signed_notionals)
+        if total_notional <= 0:
+            return 0.0, 0.0, 0.0, 0.0, False
+        delta_ratio = sum(signed_notionals) / total_notional
+        cvd_slope = (cvd_points[-1] - cvd_points[0]) / total_notional if len(cvd_points) > 1 else delta_ratio
+        directional_delta_ratio = delta_ratio if direction == Direction.LONG else -delta_ratio
+        directional_cvd_slope = cvd_slope if direction == Direction.LONG else -cvd_slope
+        recent_reference = execution_candles[-min(len(execution_candles), 6)]
+        price_change = execution_candles[-1].close - recent_reference.close
+        if direction == Direction.LONG:
+            divergence = price_change > 0 and delta_ratio <= -self.strategy.delta_divergence_threshold
+        else:
+            divergence = price_change < 0 and delta_ratio >= self.strategy.delta_divergence_threshold
+        return delta_ratio, directional_delta_ratio, cvd_slope, directional_cvd_slope, divergence
+
     def _book_imbalance(self, book: BookSnapshot | None) -> float:
         if book is None:
             return 0.0
@@ -843,7 +935,11 @@ class RuleEngine:
             return f"Volume z-score {coin.volume_z_15m:.2f}, quote-volume x{coin.quote_activity_ratio:.2f}."
         if name == "structure_pressure":
             return f"Наторговка {structure.consolidation_range_atr:.2f} ATR и squeeze score {structure.squeeze_score:.2f}."
-        return f"Пробой на {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, follow-through {'да' if breakout.follow_through_5m else 'нет'}."
+        return (
+            f"Пробой на {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, "
+            f"delta {breakout.delta_ratio:.2f}, CVD {breakout.cvd_slope:.2f}, "
+            f"follow-through {'да' if breakout.follow_through_5m else 'нет'}."
+        )
 
     def _trigger_text(
         self,
@@ -907,6 +1003,7 @@ class RuleEngine:
             and coin.is_active
             and coin.score >= 0.58
             and breakout.volume_z >= self.strategy.watchlist_volume_z_threshold
+            and breakout.watch_flow_support
             and level.kind in {LevelKind.RESISTANCE, LevelKind.SUPPORT}
         )
 
@@ -947,6 +1044,12 @@ class RuleEngine:
             notes.append("После пробоя нет clean follow-through на 5m.")
         if not breakout.cross_ok:
             notes.append("Кросс-биржевое подтверждение по secondary venue слабое.")
+        if breakout.delta_divergence:
+            notes.append("Delta / CVD diverge from price and raise false-breakout risk.")
+        elif not breakout.aggressive_flow_support:
+            notes.append(
+                f"Aggressive flow does not confirm yet: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}."
+            )
         if not notes:
             notes.append("Сетап выглядит чисто и близок к actionable breakout scalp.")
         return notes

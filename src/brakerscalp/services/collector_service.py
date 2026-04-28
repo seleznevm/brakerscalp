@@ -136,6 +136,12 @@ class CollectorService:
 
     async def _current_universe(self) -> list[UniverseSymbol]:
         allowed_venues = set(self.adapters)
+        if hasattr(self.repository, "list_runtime_universe"):
+            persisted = await self.repository.list_runtime_universe(enabled_venues=[item.value for item in allowed_venues])
+            if persisted:
+                if hasattr(self.cache, "store_universe"):
+                    await self.cache.store_universe(persisted)
+                return [item for item in persisted if item.primary_venue in allowed_venues]
         if hasattr(self.cache, "get_universe_symbols"):
             runtime_universe = await self.cache.get_universe_symbols(self.universe)
             if runtime_universe:

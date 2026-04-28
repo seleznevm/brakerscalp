@@ -413,7 +413,7 @@ class Repository:
 
     async def list_runtime_universe(self, enabled_venues: list[str] | None = None) -> list[UniverseSymbol]:
         async with self.session_factory() as session:
-            stmt = select(RuntimeUniverseRecord).order_by(RuntimeUniverseRecord.primary_venue.asc(), RuntimeUniverseRecord.symbol.asc())
+            stmt = select(RuntimeUniverseRecord).order_by(RuntimeUniverseRecord.symbol.asc(), RuntimeUniverseRecord.primary_venue.asc())
             if enabled_venues:
                 stmt = stmt.where(RuntimeUniverseRecord.primary_venue.in_(enabled_venues))
             result = await session.execute(stmt)

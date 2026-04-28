@@ -12,7 +12,7 @@ def load_universe(path: Path) -> list[UniverseSymbol]:
 
 
 def save_universe(path: Path, symbols: list[UniverseSymbol]) -> None:
-    ordered = sorted(symbols, key=lambda item: (item.primary_venue.value, item.symbol))
+    ordered = sorted(symbols, key=lambda item: item.symbol.upper())
     payload = {
         "symbols": [
             {

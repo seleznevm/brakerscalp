@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import fakeredis.aioredis
 import pytest
 
-from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, OrderBookLevel, Timeframe, Venue
+from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, OrderBookLevel, Side, Timeframe, TradeTick, Venue
 from brakerscalp.signals.levels import LevelDetector
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.db import create_engine, create_session_factory, init_db
@@ -120,6 +120,38 @@ def make_derivatives() -> Callable[..., DerivativeContext]:
         )
 
     return _make_derivatives
+
+
+@pytest.fixture
+def make_trades() -> Callable[..., list[TradeTick]]:
+    def _make_trades(
+        symbol: str = "BTCUSDT",
+        venue: Venue = Venue.BINANCE,
+        *,
+        bias: str = "buy",
+        count: int = 40,
+        start_price: float = 66000.0,
+    ) -> list[TradeTick]:
+        trades: list[TradeTick] = []
+        start = datetime.now(tz=timezone.utc) - timedelta(minutes=count)
+        for index in range(count):
+            dominant_side = Side.BUY if bias == "buy" else Side.SELL
+            secondary_side = Side.SELL if dominant_side == Side.BUY else Side.BUY
+            side = dominant_side if index % 5 else secondary_side
+            size = 2.4 if side == dominant_side else 0.7
+            trades.append(
+                TradeTick(
+                    symbol=symbol,
+                    venue=venue,
+                    timestamp=start + timedelta(seconds=index * 30),
+                    price=start_price + index * 2.0,
+                    size=size,
+                    side=side,
+                )
+            )
+        return trades
+
+    return _make_trades
 
 
 @pytest.fixture

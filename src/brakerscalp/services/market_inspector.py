@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from brakerscalp.config import Settings
-from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, Direction, MarketCandle, Timeframe, UniverseSymbol, Venue
+from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, Direction, MarketCandle, Timeframe, TradeTick, UniverseSymbol, Venue
 from brakerscalp.exchanges.base import ExchangeAdapter
 from brakerscalp.services.daily_summary import (
     SetupLifecycle,
@@ -128,15 +128,22 @@ class MarketInspector:
 
     async def list_universe(self) -> list[UniverseSymbol]:
         allowed_venues = set(self.adapters)
+        persisted = await self.repository.list_runtime_universe(enabled_venues=[item.value for item in allowed_venues] if allowed_venues else None)
+        if persisted:
+            if hasattr(self.cache, "store_universe"):
+                await self.cache.store_universe(persisted)
+            if not allowed_venues:
+                return sorted(persisted, key=lambda item: item.symbol.upper())
+            return sorted([item for item in persisted if item.primary_venue in allowed_venues], key=lambda item: item.symbol.upper())
         if hasattr(self.cache, "get_universe_symbols"):
             runtime_universe = await self.cache.get_universe_symbols(self.universe)
             if runtime_universe:
                 if not allowed_venues:
-                    return runtime_universe
-                return [item for item in runtime_universe if item.primary_venue in allowed_venues]
+                    return sorted(runtime_universe, key=lambda item: item.symbol.upper())
+                return sorted([item for item in runtime_universe if item.primary_venue in allowed_venues], key=lambda item: item.symbol.upper())
         if not allowed_venues:
-            return list(self.universe)
-        return [item for item in self.universe if item.primary_venue in allowed_venues]
+            return sorted(list(self.universe), key=lambda item: item.symbol.upper())
+        return sorted([item for item in self.universe if item.primary_venue in allowed_venues], key=lambda item: item.symbol.upper())
 
     async def screen_universe(self, scope: str = "active") -> list[ScreeningResult]:
         self.rule_engine.configure(await self._runtime_strategy_config())
@@ -436,6 +443,7 @@ class MarketInspector:
             candles_15m=candles_15m,
             candles_5m=candles_5m,
             levels=levels,
+            trades=self._parse_model_list(await self.cache.get_trades(venue, symbol), TradeTick),
             book=BookSnapshot.model_validate(book_payload) if book_payload else None,
             derivative_context=DerivativeContext.model_validate(derivatives_payload) if derivatives_payload else None,
             health=DataHealth.model_validate(health_payload),
@@ -449,6 +457,7 @@ class MarketInspector:
         candles_5m = self._closed_candles(await adapter.fetch_recent_candles(symbol, Timeframe.M5, 140))
         levels = self.level_detector.detect(symbol, venue, candles_4h, candles_1h)
         book = await adapter.fetch_top_book(symbol, depth=self.settings.exchange_book_depth)
+        trades = await adapter.fetch_trades(symbol, limit=self.settings.exchange_trades_limit)
         derivatives = await adapter.fetch_derivative_context(symbol)
         health = await adapter.healthcheck(symbol)
         return EngineInput(
@@ -459,6 +468,7 @@ class MarketInspector:
             candles_15m=candles_15m,
             candles_5m=candles_5m,
             levels=levels,
+            trades=trades,
             book=book,
             derivative_context=derivatives,
             health=health,

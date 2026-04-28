@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, SignalClass, UniverseSymbol, Venue
+from brakerscalp.domain.models import BookSnapshot, DataHealth, DerivativeContext, MarketCandle, SignalClass, TradeTick, UniverseSymbol, Venue
 from brakerscalp.logging import get_logger
 from brakerscalp.metrics import ALERTS_TOTAL, SIGNALS_IN_DB, STALE_DATA_RATIO
 from brakerscalp.serialization import loads
@@ -119,6 +119,7 @@ class EngineService:
                 candles_15m=candles_15m,
                 candles_5m=candles_5m,
                 levels=levels,
+                trades=parse_model_list(await self.cache.get_trades(primary_venue, symbol), TradeTick),
                 book=BookSnapshot.model_validate(book_payload) if book_payload else None,
                 derivative_context=DerivativeContext.model_validate(derivatives_payload) if derivatives_payload else None,
                 health=health,
@@ -182,6 +183,11 @@ class EngineService:
 
     async def _current_universe(self) -> list[UniverseSymbol]:
         allowed_venues = {item.primary_venue for item in self.universe}
+        persisted = await self.repository.list_runtime_universe(enabled_venues=[item.value for item in allowed_venues])
+        if persisted:
+            if hasattr(self.cache, "store_universe"):
+                await self.cache.store_universe(persisted)
+            return [item for item in persisted if item.primary_venue in allowed_venues]
         if hasattr(self.cache, "get_universe_symbols"):
             runtime_universe = await self.cache.get_universe_symbols(self.universe)
             if runtime_universe:

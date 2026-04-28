@@ -6,7 +6,7 @@ from brakerscalp.logging import configure_logging
 from brakerscalp.storage.cache import StateCache
 from brakerscalp.storage.db import create_engine, create_session_factory, init_db
 from brakerscalp.storage.repository import Repository
-from brakerscalp.universe import load_universe
+from brakerscalp.universe import load_universe, save_universe
 
 
 async def build_runtime() -> tuple[Settings, Repository, StateCache, list]:
@@ -19,10 +19,14 @@ async def build_runtime() -> tuple[Settings, Repository, StateCache, list]:
     cache = StateCache.from_url(settings.redis_url)
     file_universe = [item for item in load_universe(settings.universe_path) if item.primary_venue.value in settings.enabled_venues]
     db_universe = await repository.list_runtime_universe(enabled_venues=settings.enabled_venues)
-    if not db_universe and file_universe:
-        await repository.replace_runtime_universe(file_universe)
-        db_universe = file_universe
-    universe = db_universe or file_universe
+    merged_map = {item.symbol.upper(): item for item in file_universe}
+    for item in db_universe:
+        merged_map[item.symbol.upper()] = item
+    universe = sorted(merged_map.values(), key=lambda item: item.symbol.upper())
+    if universe:
+        await repository.replace_runtime_universe(universe)
+        if universe != file_universe:
+            save_universe(settings.universe_path, universe)
     await cache.store_universe(universe)
     return settings, repository, cache, universe
 

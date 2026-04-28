@@ -376,7 +376,7 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
 
 @pytest.mark.asyncio
 async def test_setups_page_uses_first_call_time_for_grouped_setup(repository, cache) -> None:
-    first_detected_at = datetime(2026, 4, 25, 3, 0, tzinfo=timezone.utc)
+    first_detected_at = datetime.now(tz=timezone.utc) - timedelta(hours=6)
     second_detected_at = first_detected_at + timedelta(hours=2)
     base_kwargs = dict(
         symbol="BTCUSDT",
@@ -451,8 +451,10 @@ async def test_setups_page_uses_first_call_time_for_grouped_setup(repository, ca
         response = await client.get("/setups")
 
     assert response.status_code == 200
-    assert "25.04.2026 10:00:00" in response.text
-    assert "25.04.2026 12:00:00" not in response.text
+    expected_first_call = first_detected_at.astimezone(timezone(timedelta(hours=7))).strftime("%d.%m.%Y %H:%M:%S")
+    unexpected_second_call = second_detected_at.astimezone(timezone(timedelta(hours=7))).strftime("%d.%m.%Y %H:%M:%S")
+    assert expected_first_call in response.text
+    assert unexpected_second_call not in response.text
 
 
 @pytest.mark.asyncio
@@ -497,6 +499,9 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
             body_ratio=0.6,
             follow_through_5m=True,
             book_imbalance=0.12,
+            delta_ratio=0.18,
+            cvd_slope=0.11,
+            delta_divergence=False,
             freshness_ms=200,
             spread_ratio=1.0,
             notes=["Active breakout pressure"],
@@ -532,6 +537,9 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
             body_ratio=0.5,
             follow_through_5m=False,
             book_imbalance=-0.08,
+            delta_ratio=-0.09,
+            cvd_slope=-0.06,
+            delta_divergence=False,
             freshness_ms=120,
             spread_ratio=1.1,
             notes=["Near level"],
@@ -581,6 +589,10 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
             "&close_to_extreme_threshold=0.18"
             "&range_expansion_threshold=1.45"
             "&sl_multiplier=0.30"
+            "&delta_ratio_threshold=0.16"
+            "&watchlist_delta_ratio_threshold=0.05"
+            "&cvd_slope_threshold=0.08"
+            "&delta_divergence_threshold=0.07"
         )
         applied = await cache.get_strategy_config(default=settings.default_strategy_config())
         defaults_response = await client.get("/settings/strategy-defaults")
@@ -591,6 +603,7 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
     assert applied["timeframe"] == "5m"
     assert applied["volume_z_threshold"] == 2.15
     assert applied["min_touches"] == 4
+    assert applied["delta_ratio_threshold"] == 0.16
     assert defaults_response.status_code == 303
     assert defaults_response.headers["location"] == "/settings?strategy_saved=defaults"
     assert restored["timeframe"] == settings.default_strategy_config()["timeframe"]
@@ -627,3 +640,44 @@ async def test_settings_universe_add_and_remove_updates_repository_and_cache(rep
     assert remove_response.status_code == 303
     assert {item.symbol for item in runtime_universe} == {"ETHUSDT"}
     assert {item.symbol for item in cached_universe} == {"ETHUSDT"}
+
+
+@pytest.mark.asyncio
+async def test_settings_page_prefers_persisted_runtime_universe_and_sorts_by_symbol(repository, cache, tmp_path: Path) -> None:
+    universe_path = tmp_path / "universe.json"
+    save_universe(universe_path, [UniverseSymbol(symbol="SOLUSDT", primary_venue=Venue.BINANCE)])
+    await repository.replace_runtime_universe(
+        [
+            UniverseSymbol(symbol="ETHUSDT", primary_venue=Venue.BINANCE),
+            UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BYBIT),
+        ]
+    )
+    await cache.store_universe([UniverseSymbol(symbol="SOLUSDT", primary_venue=Venue.BINANCE)])
+
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+        universe_path=universe_path,
+    )
+    app = build_api(
+        repository,
+        cache,
+        settings,
+        universe=[UniverseSymbol(symbol="SOLUSDT", primary_venue=Venue.BINANCE)],
+        adapters={Venue.BINANCE: object(), Venue.BYBIT: object()},
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        response = await client.get("/settings")
+
+    assert response.status_code == 200
+    assert "BTCUSDT" in response.text
+    assert "ETHUSDT" in response.text
+    assert "SOLUSDT" not in response.text
+    universe_section = response.text.split("Runtime Universe", 1)[1]
+    assert universe_section.index("BTCUSDT") < universe_section.index("ETHUSDT")
