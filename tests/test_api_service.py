@@ -289,6 +289,51 @@ async def test_statistics_page_persists_by_symbol_snapshot_in_database(repositor
 
 
 @pytest.mark.asyncio
+async def test_statistics_page_handles_pre_alert_signals(repository, cache) -> None:
+    detected_at = datetime.now(tz=timezone.utc) - timedelta(hours=12)
+    decision = SignalDecision(
+        symbol="ARBUSDT",
+        venue=Venue.BINANCE,
+        timeframe=Timeframe.M15,
+        setup=SetupType.BREAKOUT,
+        direction=Direction.LONG,
+        signal_class=SignalClass.PRE_ALERT,
+        confidence=78.0,
+        level_id="arb-pre-alert-level",
+        alert_key="arb-pre-alert-test",
+        detected_at=detected_at,
+        entry_price=1.25,
+        invalidation_price=1.20,
+        targets=[1.35, 1.42],
+        expected_rr=2.0,
+        rationale=["Compression near level"],
+        why_not_higher=["Breakout not started yet"],
+        contributions=[ScoreContribution(group="level", score=20.0, max_score=25.0, reason="Strong level")],
+        data_health=DataHealth(venue=Venue.BINANCE, symbol="ARBUSDT", is_fresh=True, freshness_ms=0),
+        feature_snapshot={"atr_15m": 0.03},
+        render_context={"trigger": "Price is approaching the level", "price_zone": "1.23 - 1.25", "setup_stage": "pre_alert"},
+    )
+    await repository.save_signal(decision)
+
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        response = await client.get("/statistics")
+
+    assert response.status_code == 200
+    assert "Setup Statistics" in response.text
+
+
+@pytest.mark.asyncio
 async def test_setups_page_gracefully_handles_missing_status_filter(repository, cache) -> None:
     detected_at = datetime.now(tz=timezone.utc) - timedelta(hours=6)
     decision = SignalDecision(

@@ -2105,7 +2105,7 @@ async def _statistics_export_rows(
     end_at: datetime,
     symbol_query: str,
 ) -> list[dict[str, Any]]:
-    signals = await repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist"])
+    signals = await repository.list_signals_between(start_at, end_at, signal_classes=["actionable", "watchlist", "pre_alert"])
     query = symbol_query.strip().upper()
     rows: list[dict[str, Any]] = []
     grouped_signals = inspector._group_signals_by_setup(signals)

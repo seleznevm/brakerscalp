@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from brakerscalp.domain.models import AlertMessage, BookSnapshot, MarketCandle, OrderFlowSnapshot, SignalClass, TradeTick, UniverseSymbol, Venue
 from brakerscalp.logging import get_logger
-from brakerscalp.services.daily_summary import SETUP_STATUS_EXECUTED, evaluate_setup_lifecycle
+from brakerscalp.services.daily_summary import SETUP_STATUS_EXECUTED, SetupLifecycle, evaluate_setup_lifecycle
 from brakerscalp.signals.engine import StrategyRuntimeConfig
 from brakerscalp.signals.orderflow import compute_order_flow_snapshot
 from brakerscalp.storage.cache import StateCache
@@ -96,27 +96,73 @@ class OrderFlowAnalyzerService:
 
     async def _process_active_signals(self, strategy: StrategyRuntimeConfig) -> int:
         if not strategy.enable_time_stop_alerts and not strategy.enable_dynamic_breakeven_alerts:
-            return 0
+            signals = await self.repository.list_signals_between(
+                datetime.now(tz=timezone.utc) - timedelta(days=1),
+                datetime.now(tz=timezone.utc) + timedelta(minutes=1),
+                signal_classes=["actionable", "watchlist", "pre_alert"],
+            )
+            count = 0
+            for signal in signals:
+                lifecycle = await self._signal_lifecycle(signal, datetime.now(tz=timezone.utc))
+                if await self._maybe_send_executed(signal, lifecycle):
+                    count += 1
+            return count
         now = datetime.now(tz=timezone.utc)
         signals = await self.repository.list_signals_between(
             now - timedelta(days=1),
             now + timedelta(minutes=1),
-            signal_classes=["actionable", "watchlist"],
+            signal_classes=["actionable", "watchlist", "pre_alert"],
         )
         count = 0
         for signal in signals:
-            if str((signal.render_context or {}).get("setup_stage", "")) != "activated":
-                continue
-            if await self._maybe_send_breakeven(signal, strategy, now):
+            lifecycle = await self._signal_lifecycle(signal, now)
+            if await self._maybe_send_executed(signal, lifecycle):
                 count += 1
-            if await self._maybe_send_time_stop(signal, strategy, now):
+            if await self._maybe_send_breakeven(signal, strategy, now, lifecycle=lifecycle):
+                count += 1
+            if await self._maybe_send_time_stop(signal, strategy, now, lifecycle=lifecycle):
                 count += 1
         return count
 
-    async def _maybe_send_breakeven(self, signal: SignalRecord, strategy: StrategyRuntimeConfig, now: datetime) -> bool:
+    async def _maybe_send_executed(self, signal: SignalRecord, lifecycle: SetupLifecycle) -> bool:
+        if lifecycle.entry_at is None:
+            return False
+        if str((signal.render_context or {}).get("setup_stage", "")) == "activated":
+            return False
+        dedupe_key = f"{signal.decision_id}:executed"
+        if not await self.cache.acquire_once_key("management-alert", dedupe_key, ttl_seconds=172800):
+            return False
+        tp1 = float(signal.targets[0]) if signal.targets else 0.0
+        tp2 = float(signal.targets[1]) if len(signal.targets) > 1 else tp1
+        text = (
+            f"✅ {signal.symbol} | {signal.setup.upper()} | {signal.direction.upper()} | {signal.timeframe}\n"
+            f"#{signal.setup.upper()} #{self._coin_hashtag(signal.symbol)}\n"
+            f"Entry triggered at {_format_dt(lifecycle.entry_at)}\n"
+            f"Entry: {float(signal.entry_price):.4f}\n"
+            f"TP1: {tp1:.4f}\n"
+            f"TP2: {tp2:.4f}\n"
+            f"SL: {float(signal.invalidation_price):.4f}\n"
+            f"EXECUTED"
+        )
+        await self._queue_alert(
+            signal_id=f"{signal.decision_id}#executed",
+            alert_key=f"{signal.alert_key}:executed",
+            text=text,
+            signal_class=SignalClass.ACTIONABLE,
+        )
+        return True
+
+    async def _maybe_send_breakeven(
+        self,
+        signal: SignalRecord,
+        strategy: StrategyRuntimeConfig,
+        now: datetime,
+        *,
+        lifecycle: SetupLifecycle | None = None,
+    ) -> bool:
         if not strategy.enable_dynamic_breakeven_alerts:
             return False
-        lifecycle = await self._signal_lifecycle(signal, now)
+        lifecycle = lifecycle or await self._signal_lifecycle(signal, now)
         if lifecycle.status != SETUP_STATUS_EXECUTED:
             return False
         current_price = await self._signal_current_price(signal)
@@ -143,12 +189,19 @@ class OrderFlowAnalyzerService:
         )
         return True
 
-    async def _maybe_send_time_stop(self, signal: SignalRecord, strategy: StrategyRuntimeConfig, now: datetime) -> bool:
+    async def _maybe_send_time_stop(
+        self,
+        signal: SignalRecord,
+        strategy: StrategyRuntimeConfig,
+        now: datetime,
+        *,
+        lifecycle: SetupLifecycle | None = None,
+    ) -> bool:
         if not strategy.enable_time_stop_alerts:
             return False
         if now < signal.detected_at + timedelta(minutes=strategy.time_stop_minutes):
             return False
-        lifecycle = await self._signal_lifecycle(signal, now)
+        lifecycle = lifecycle or await self._signal_lifecycle(signal, now)
         if lifecycle.status != SETUP_STATUS_EXECUTED:
             return False
         max_move_pct = await self._max_favorable_move_pct(signal)
@@ -277,3 +330,9 @@ class OrderFlowAnalyzerService:
             return Venue(value)
         except ValueError:
             return Venue.BINANCE
+
+
+def _format_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")

@@ -234,6 +234,7 @@ class MarketInspector:
                 "pending": 0,
                 "actionable": 0,
                 "watchlist": 0,
+                "pre_alert": 0,
                 "confidence_sum": 0.0,
             }
         )
