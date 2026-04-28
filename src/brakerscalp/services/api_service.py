@@ -1192,15 +1192,24 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       color: #f5fbff;
     }}
     .strategy-form {{
-      align-items: flex-start;
-      gap: 10px;
+      display: block;
+      margin-top: 10px;
+    }}
+    .strategy-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px 12px;
+      margin: 12px 0 14px;
     }}
     .field-block {{
       display: flex;
-      flex: 1 1 178px;
-      min-width: 178px;
+      min-width: 0;
       flex-direction: column;
-      gap: 4px;
+      gap: 5px;
+      padding: 8px 10px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015));
     }}
     .field-block input,
     .field-block select {{
@@ -1208,14 +1217,31 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
     }}
     .strategy-form .field-block input,
     .strategy-form .field-block select {{
-      min-height: 38px;
-      padding: 8px 10px;
+      flex: 0 0 auto;
+      min-height: 40px;
+      padding: 8px 12px;
       border-radius: 10px;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
+      line-height: 1.2;
+      background: rgba(6, 16, 24, 0.78);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
     }}
     .strategy-form .field-block span {{
-      font-size: 0.82rem;
-      line-height: 1.2;
+      font-size: 0.76rem;
+      line-height: 1.1;
+      letter-spacing: 0.03em;
+      color: #d7e7f3;
+    }}
+    .strategy-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 2px;
+    }}
+    .strategy-actions button,
+    .strategy-actions .button-link {{
+      min-height: 42px;
+      padding: 10px 16px;
     }}
     .sort-link {{
       color: inherit;
@@ -1824,9 +1850,11 @@ def _runtime_settings_form(
       <h3>Strategy runtime</h3>
       <div class="muted">Adjust breakout filters without restarting the stack. The values are applied from Redis at runtime.</div>
       <form class="manual-form strategy-form" method="get" action="/settings/apply-strategy">
-        {strategy_fields}
-        <button type="submit">Apply</button>
-        <a class="button-link" href="/settings/strategy-defaults">By default</a>
+        <div class="strategy-grid">{strategy_fields}</div>
+        <div class="strategy-actions">
+          <button type="submit">Apply</button>
+          <a class="button-link" href="/settings/strategy-defaults">By default</a>
+        </div>
       </form>
       {strategy_message}
     </div>
