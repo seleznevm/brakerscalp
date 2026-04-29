@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     strategy_enable_liquidation_levels: bool = True
     strategy_enable_round_number_levels: bool = True
     strategy_enable_tick_velocity_alerts: bool = True
-    strategy_tick_velocity_alert_multiplier: float = 1.8
+    strategy_tick_velocity_alert_multiplier: float = 8.0
     strategy_enable_time_stop_alerts: bool = True
     strategy_time_stop_minutes: int = 3
     strategy_time_stop_min_move_pct: float = 1.0

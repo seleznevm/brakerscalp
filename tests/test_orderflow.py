@@ -41,6 +41,40 @@ def test_compute_order_flow_snapshot_detects_velocity_and_delta() -> None:
     assert snapshot.cvd_slope > 0.0
 
 
+def test_compute_order_flow_snapshot_ignores_sparse_baseline() -> None:
+    now = datetime.now(tz=timezone.utc)
+    trades: list[TradeTick] = []
+    for index in range(6):
+        trades.append(
+            TradeTick(
+                symbol="ALTUSDT",
+                venue=Venue.BINANCE,
+                timestamp=now - timedelta(minutes=9) + timedelta(seconds=index * 45),
+                price=10.0 + index * 0.01,
+                size=5.0,
+                side=Side.BUY if index % 2 else Side.SELL,
+            )
+        )
+    for index in range(25):
+        trades.append(
+            TradeTick(
+                symbol="ALTUSDT",
+                venue=Venue.BINANCE,
+                timestamp=now - timedelta(seconds=20) + timedelta(milliseconds=index * 600),
+                price=10.2 + index * 0.001,
+                size=8.0,
+                side=Side.BUY,
+            )
+        )
+
+    snapshot = compute_order_flow_snapshot("ALTUSDT", Venue.BINANCE, trades, now=now)
+
+    assert snapshot.recent_trade_count == 25
+    assert snapshot.baseline_trade_count == 6
+    assert snapshot.baseline_tick_velocity == 0.0
+    assert snapshot.tick_velocity_ratio == 0.0
+
+
 def test_benchmark_support_blocks_weak_alt_short(make_candles) -> None:
     engine = RuleEngine()
     alt = make_candles(venue=Venue.BINANCE, symbol="ALTUSDT", timeframe=Timeframe.M5, count=30, step=0.02, start_price=10.0)

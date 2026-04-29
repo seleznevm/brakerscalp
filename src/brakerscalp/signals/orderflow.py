@@ -40,6 +40,7 @@ def compute_order_flow_snapshot(
     now: datetime | None = None,
     recent_seconds: int = 30,
     baseline_seconds: int = 600,
+    min_baseline_trades: int = 20,
 ) -> OrderFlowSnapshot:
     reference_now = now or datetime.now(tz=timezone.utc)
     if not trades:
@@ -49,13 +50,22 @@ def compute_order_flow_snapshot(
     recent_cutoff = reference_now - timedelta(seconds=recent_seconds)
     baseline_trades = [item for item in ordered if item.timestamp >= baseline_cutoff]
     recent_trades = [item for item in baseline_trades if item.timestamp >= recent_cutoff]
+    baseline_reference_trades = [item for item in baseline_trades if item.timestamp < recent_cutoff]
     if not baseline_trades:
         baseline_trades = ordered[-min(len(ordered), 120):]
+    if not baseline_reference_trades:
+        historical = [item for item in ordered if item.timestamp < recent_cutoff]
+        baseline_reference_trades = historical[-min(len(historical), 240):]
     recent_trade_count = len(recent_trades)
-    baseline_trade_count = len(baseline_trades)
+    baseline_trade_count = len(baseline_reference_trades)
     tick_velocity = recent_trade_count / max(recent_seconds, 1)
-    baseline_tick_velocity = baseline_trade_count / max(baseline_seconds, 1)
-    tick_velocity_ratio = tick_velocity / max(baseline_tick_velocity, 1e-9) if baseline_tick_velocity else 0.0
+    baseline_window_seconds = max(baseline_seconds - recent_seconds, 1)
+    if baseline_trade_count < min_baseline_trades:
+        baseline_tick_velocity = 0.0
+        tick_velocity_ratio = 0.0
+    else:
+        baseline_tick_velocity = baseline_trade_count / baseline_window_seconds
+        tick_velocity_ratio = tick_velocity / max(baseline_tick_velocity, 1e-9)
 
     total_notional = 0.0
     delta_notional = 0.0

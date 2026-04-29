@@ -54,7 +54,7 @@ class StrategyRuntimeConfig(BaseModel):
     enable_liquidation_levels: bool = True
     enable_round_number_levels: bool = True
     enable_tick_velocity_alerts: bool = True
-    tick_velocity_alert_multiplier: float = 1.8
+    tick_velocity_alert_multiplier: float = 8.0
     enable_time_stop_alerts: bool = True
     time_stop_minutes: int = 3
     time_stop_min_move_pct: float = 1.0
@@ -636,9 +636,10 @@ class RuleEngine:
             close_to_extreme = (current.close - current.low) / candle_range
             book_support = book_imbalance <= 0.22
 
+        effective_velocity_multiplier = min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0)
         velocity_support = (
             (not self.strategy.enable_tick_velocity_alerts)
-            or tick_velocity_ratio >= max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15)
+            or tick_velocity_ratio >= max(effective_velocity_multiplier * 0.80, 1.15)
         )
         round_number_score = self._round_number_score(level, book)
         liquidation_cluster_score = self._liquidation_cluster_score(level)
@@ -673,7 +674,7 @@ class RuleEngine:
             + (0.08 if aggressive_flow_support else 0.0),
         )
         if velocity_support and tick_velocity_ratio > 0:
-            score = min(score + min(tick_velocity_ratio / max(self.strategy.tick_velocity_alert_multiplier, 1.0), 1.0) * 0.08, 1.0)
+            score = min(score + min(tick_velocity_ratio / effective_velocity_multiplier, 1.0) * 0.08, 1.0)
         if round_number_score > 0:
             score = min(score + round_number_score * 0.05, 1.0)
         if liquidation_cluster_score > 0:
@@ -817,7 +818,7 @@ class RuleEngine:
             why_not_higher.append(
                 f"Aggressive flow is still weak: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}."
             )
-        if breakout.tick_velocity_ratio < max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15):
+        if breakout.tick_velocity_ratio < max(min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0) * 0.80, 1.15):
             why_not_higher.append(
                 f"Tick velocity is not explosive enough yet: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline."
             )
@@ -1284,7 +1285,7 @@ class RuleEngine:
             )
         if not notes:
             notes.append("Сетап выглядит чисто и близок к actionable breakout scalp.")
-        if breakout.tick_velocity_ratio < max(self.strategy.tick_velocity_alert_multiplier * 0.80, 1.15):
+        if breakout.tick_velocity_ratio < max(min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0) * 0.80, 1.15):
             notes.append(f"Tick velocity is still soft: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline.")
         if breakout.correlation_headwind:
             notes.append("BTC/ETH benchmark flow is too strong for this alt short.")
