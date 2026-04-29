@@ -171,3 +171,18 @@ class StateCache:
         if raw:
             return [UniverseSymbol.model_validate(item) for item in raw]
         return list(fallback or [])
+
+    async def set_signal_lifecycle_status(self, decision_id: str, status: str, ttl_seconds: int = 604800) -> None:
+        await self.redis.set(
+            self._key("lifecycle-status", decision_id),
+            status.encode("utf-8"),
+            ex=ttl_seconds,
+        )
+
+    async def get_signal_lifecycle_status(self, decision_id: str) -> str | None:
+        raw = await self.redis.get(self._key("lifecycle-status", decision_id))
+        if raw in (None, b"", ""):
+            return None
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8")
+        return str(raw)

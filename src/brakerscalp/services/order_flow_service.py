@@ -96,16 +96,19 @@ class OrderFlowAnalyzerService:
 
     async def _process_active_signals(self, strategy: StrategyRuntimeConfig) -> int:
         if not strategy.enable_time_stop_alerts and not strategy.enable_dynamic_breakeven_alerts:
+            now = datetime.now(tz=timezone.utc)
             signals = await self.repository.list_signals_between(
-                datetime.now(tz=timezone.utc) - timedelta(days=1),
-                datetime.now(tz=timezone.utc) + timedelta(minutes=1),
+                now - timedelta(days=1),
+                now + timedelta(minutes=1),
                 signal_classes=["actionable", "watchlist", "pre_alert"],
             )
             count = 0
             for signal in signals:
-                lifecycle = await self._signal_lifecycle(signal, datetime.now(tz=timezone.utc))
-                if await self._maybe_send_executed(signal, lifecycle):
+                lifecycle = await self._signal_lifecycle(signal, now)
+                previous_status = await self.cache.get_signal_lifecycle_status(signal.decision_id)
+                if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status):
                     count += 1
+                await self.cache.set_signal_lifecycle_status(signal.decision_id, lifecycle.status)
             return count
         now = datetime.now(tz=timezone.utc)
         signals = await self.repository.list_signals_between(
@@ -116,18 +119,28 @@ class OrderFlowAnalyzerService:
         count = 0
         for signal in signals:
             lifecycle = await self._signal_lifecycle(signal, now)
-            if await self._maybe_send_executed(signal, lifecycle):
+            previous_status = await self.cache.get_signal_lifecycle_status(signal.decision_id)
+            if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status):
                 count += 1
             if await self._maybe_send_breakeven(signal, strategy, now, lifecycle=lifecycle):
                 count += 1
             if await self._maybe_send_time_stop(signal, strategy, now, lifecycle=lifecycle):
                 count += 1
+            await self.cache.set_signal_lifecycle_status(signal.decision_id, lifecycle.status)
         return count
 
-    async def _maybe_send_executed(self, signal: SignalRecord, lifecycle: SetupLifecycle) -> bool:
-        if lifecycle.entry_at is None:
+    async def _maybe_send_executed(
+        self,
+        signal: SignalRecord,
+        lifecycle: SetupLifecycle,
+        *,
+        previous_status: str | None,
+    ) -> bool:
+        if lifecycle.status != SETUP_STATUS_EXECUTED or lifecycle.entry_at is None:
             return False
-        if str((signal.render_context or {}).get("setup_stage", "")) == "activated":
+        if previous_status == SETUP_STATUS_EXECUTED:
+            return False
+        if previous_status is None and str((signal.render_context or {}).get("setup_stage", "")) == "activated":
             return False
         dedupe_key = f"{signal.decision_id}:executed"
         if not await self.cache.acquire_once_key("management-alert", dedupe_key, ttl_seconds=172800):
