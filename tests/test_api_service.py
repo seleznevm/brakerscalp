@@ -547,7 +547,7 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
                 delta_ratio=0.18,
                 cvd_slope=0.11,
                 delta_divergence=False,
-                tick_velocity_ratio=2.1,
+                tick_qty_per_5s=74,
                 freshness_ms=200,
                 spread_ratio=1.0,
                 notes=["Active breakout pressure"],
@@ -586,7 +586,7 @@ async def test_screener_page_supports_sorting_and_tooltips(repository, cache) ->
                 delta_ratio=-0.09,
                 cvd_slope=-0.06,
                 delta_divergence=False,
-                tick_velocity_ratio=1.3,
+                tick_qty_per_5s=28,
                 freshness_ms=120,
                 spread_ratio=1.1,
                 notes=["Near level"],
@@ -650,7 +650,7 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
             "&enable_liquidation_levels=false"
             "&enable_round_number_levels=false"
             "&enable_tick_velocity_alerts=true"
-            "&tick_velocity_alert_multiplier=2.25"
+            "&tick_qty_per_5s=65"
             "&enable_time_stop_alerts=true"
             "&time_stop_minutes=4"
             "&time_stop_min_move_pct=1.2"
@@ -671,7 +671,7 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
     assert applied["delta_ratio_threshold"] == 0.16
     assert applied["enable_btc_eth_correlation_filter"] is False
     assert applied["btc_correlation_threshold"] == 0.55
-    assert applied["tick_velocity_alert_multiplier"] == 2.25
+    assert applied["tick_qty_per_5s"] == 65
     assert applied["time_stop_minutes"] == 4
     assert applied["enable_dynamic_breakeven_alerts"] is False
     assert defaults_response.status_code == 303

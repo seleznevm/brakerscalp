@@ -120,9 +120,8 @@ class OrderFlowSnapshot(BaseModel):
     timestamp: datetime = Field(default_factory=utcnow)
     delta_ratio: float = 0.0
     cvd_slope: float = 0.0
-    tick_velocity: float = 0.0
-    baseline_tick_velocity: float = 0.0
-    tick_velocity_ratio: float = 0.0
+    tick_qty_per_5s: int = 0
+    tick_window_seconds: int = 5
     recent_trade_count: int = 0
     baseline_trade_count: int = 0
 

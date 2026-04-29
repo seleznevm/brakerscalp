@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from brakerscalp.domain.models import (
     BookSnapshot,
@@ -54,12 +54,24 @@ class StrategyRuntimeConfig(BaseModel):
     enable_liquidation_levels: bool = True
     enable_round_number_levels: bool = True
     enable_tick_velocity_alerts: bool = True
-    tick_velocity_alert_multiplier: float = 8.0
+    tick_qty_per_5s: int = 40
     enable_time_stop_alerts: bool = True
     time_stop_minutes: int = 3
     time_stop_min_move_pct: float = 1.0
     enable_dynamic_breakeven_alerts: bool = True
     breakeven_trigger_pct: float = 0.5
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_tick_velocity(cls, data):
+        if isinstance(data, dict) and "tick_qty_per_5s" not in data and "tick_velocity_alert_multiplier" in data:
+            migrated = dict(data)
+            try:
+                migrated["tick_qty_per_5s"] = int(round(float(migrated["tick_velocity_alert_multiplier"]) * 5))
+            except (TypeError, ValueError):
+                migrated["tick_qty_per_5s"] = 40
+            return migrated
+        return data
 
 
 @dataclass(slots=True)
@@ -135,7 +147,7 @@ class BreakoutState:
     delta_divergence: bool
     aggressive_flow_support: bool
     watch_flow_support: bool
-    tick_velocity_ratio: float
+    tick_qty_per_5s: int
     round_number_score: float
     liquidation_cluster_score: float
     correlation_headwind: bool
@@ -176,7 +188,7 @@ class ScreeningResult:
     delta_ratio: float
     cvd_slope: float
     delta_divergence: bool
-    tick_velocity_ratio: float
+    tick_qty_per_5s: int
     freshness_ms: int
     spread_ratio: float
     notes: list[str]
@@ -364,7 +376,7 @@ class RuleEngine:
             delta_ratio=breakout.delta_ratio,
             cvd_slope=breakout.cvd_slope,
             delta_divergence=breakout.delta_divergence,
-            tick_velocity_ratio=breakout.tick_velocity_ratio,
+            tick_qty_per_5s=breakout.tick_qty_per_5s,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=breakout.spread_ratio,
             notes=notes,
@@ -415,7 +427,7 @@ class RuleEngine:
             delta_ratio=0.0,
             cvd_slope=0.0,
             delta_divergence=False,
-            tick_velocity_ratio=0.0,
+            tick_qty_per_5s=0,
             freshness_ms=payload.health.freshness_ms,
             spread_ratio=payload.health.spread_ratio,
             notes=notes,
@@ -602,7 +614,7 @@ class RuleEngine:
             cvd_slope = order_flow.cvd_slope
             directional_delta_ratio = delta_ratio if direction == Direction.LONG else -delta_ratio
             directional_cvd_slope = cvd_slope if direction == Direction.LONG else -cvd_slope
-            tick_velocity_ratio = order_flow.tick_velocity_ratio
+            tick_qty_per_5s = order_flow.tick_qty_per_5s
             recent_reference = execution_candles[-min(len(execution_candles), 6)]
             price_change = execution_candles[-1].close - recent_reference.close
             if direction == Direction.LONG:
@@ -615,7 +627,7 @@ class RuleEngine:
                 execution_candles=execution_candles,
                 direction=direction,
             )
-            tick_velocity_ratio = 0.0
+            tick_qty_per_5s = 0
         aggressive_flow_support = (
             directional_delta_ratio >= self.strategy.delta_ratio_threshold
             and directional_cvd_slope >= self.strategy.cvd_slope_threshold
@@ -636,10 +648,9 @@ class RuleEngine:
             close_to_extreme = (current.close - current.low) / candle_range
             book_support = book_imbalance <= 0.22
 
-        effective_velocity_multiplier = min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0)
         velocity_support = (
             (not self.strategy.enable_tick_velocity_alerts)
-            or tick_velocity_ratio >= max(effective_velocity_multiplier * 0.80, 1.15)
+            or tick_qty_per_5s >= self.strategy.tick_qty_per_5s
         )
         round_number_score = self._round_number_score(level, book)
         liquidation_cluster_score = self._liquidation_cluster_score(level)
@@ -673,8 +684,8 @@ class RuleEngine:
             + (0.06 if book_support else 0.0)
             + (0.08 if aggressive_flow_support else 0.0),
         )
-        if velocity_support and tick_velocity_ratio > 0:
-            score = min(score + min(tick_velocity_ratio / effective_velocity_multiplier, 1.0) * 0.08, 1.0)
+        if velocity_support and tick_qty_per_5s > 0:
+            score = min(score + min(tick_qty_per_5s / max(self.strategy.tick_qty_per_5s, 1), 1.0) * 0.08, 1.0)
         if round_number_score > 0:
             score = min(score + round_number_score * 0.05, 1.0)
         if liquidation_cluster_score > 0:
@@ -703,7 +714,7 @@ class RuleEngine:
             delta_divergence=delta_divergence,
             aggressive_flow_support=aggressive_flow_support,
             watch_flow_support=watch_flow_support,
-            tick_velocity_ratio=tick_velocity_ratio,
+            tick_qty_per_5s=tick_qty_per_5s,
             round_number_score=round_number_score,
             liquidation_cluster_score=liquidation_cluster_score,
             correlation_headwind=correlation_headwind,
@@ -818,9 +829,9 @@ class RuleEngine:
             why_not_higher.append(
                 f"Aggressive flow is still weak: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}."
             )
-        if breakout.tick_velocity_ratio < max(min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0) * 0.80, 1.15):
+        if breakout.tick_qty_per_5s < self.strategy.tick_qty_per_5s:
             why_not_higher.append(
-                f"Tick velocity is not explosive enough yet: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline."
+                f"Лента пока недостаточно быстрая: {breakout.tick_qty_per_5s} сделок за 5s при пороге {self.strategy.tick_qty_per_5s}."
             )
         if breakout.correlation_headwind:
             why_not_higher.append("BTC/ETH benchmark flow is too supportive for this alt short.")
@@ -841,7 +852,7 @@ class RuleEngine:
                 else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
             ),
             f"Delta / CVD: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}, divergence {'yes' if breakout.delta_divergence else 'no'}.",
-            f"Tick velocity: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline.",
+            f"Сделок в ленте за 5s: {breakout.tick_qty_per_5s}.",
         ]
         if breakout.round_number_score > 0:
             rationale.append(f"Round-number confluence: score {breakout.round_number_score:.2f}, level source {level.source}.")
@@ -892,7 +903,7 @@ class RuleEngine:
             "cascade_touches": structure.cascade_touches,
             "consolidation_range_atr": structure.consolidation_range_atr,
             "squeeze_score": structure.squeeze_score,
-            "tick_velocity_ratio": breakout.tick_velocity_ratio,
+            "tick_qty_per_5s": breakout.tick_qty_per_5s,
             "round_number_score": breakout.round_number_score,
             "liquidation_cluster_score": breakout.liquidation_cluster_score,
             "correlation_headwind": breakout.correlation_headwind,
@@ -935,7 +946,7 @@ class RuleEngine:
                 "delta_ratio": breakout.delta_ratio,
                 "cvd_slope": breakout.cvd_slope,
                 "delta_divergence": breakout.delta_divergence,
-                "tick_velocity_ratio": breakout.tick_velocity_ratio,
+                "tick_qty_per_5s": breakout.tick_qty_per_5s,
                 "round_number_score": breakout.round_number_score,
                 "liquidation_cluster_score": breakout.liquidation_cluster_score,
                 "correlation_headwind": breakout.correlation_headwind,
@@ -1285,8 +1296,10 @@ class RuleEngine:
             )
         if not notes:
             notes.append("Сетап выглядит чисто и близок к actionable breakout scalp.")
-        if breakout.tick_velocity_ratio < max(min(max(self.strategy.tick_velocity_alert_multiplier, 1.0), 3.0) * 0.80, 1.15):
-            notes.append(f"Tick velocity is still soft: {breakout.tick_velocity_ratio:.2f}x of the 10m baseline.")
+        if breakout.tick_qty_per_5s < self.strategy.tick_qty_per_5s:
+            notes.append(
+                f"Сделок за 5s пока мало: {breakout.tick_qty_per_5s} при требуемых {self.strategy.tick_qty_per_5s}."
+            )
         if breakout.correlation_headwind:
             notes.append("BTC/ETH benchmark flow is too strong for this alt short.")
         return notes

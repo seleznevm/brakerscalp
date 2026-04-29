@@ -69,6 +69,29 @@ OUTCOME_TONES = {
     "invalidation": "danger",
 }
 
+UI_STATUS_LABELS = {
+    "actionable": "READY",
+    "watchlist": "WATCHLIST",
+    "pre_alert": "PRE-ALERT",
+    "arming": "SQUEEZE",
+    "monitor": "MONITOR",
+    "cold": "COLD",
+    "stale": "STALE",
+    "insufficient": "NO DATA",
+    "online": "ONLINE",
+    "warning": "WARNING",
+    "offline": "OFFLINE",
+}
+
+UI_OUTCOME_LABELS = {
+    "watch": "WATCH",
+    "executed": "EXECUTED",
+    "tp1": "TP1",
+    "tp2": "TP2",
+    "loss": "LOSS",
+    "invalidation": "INVALIDATION",
+}
+
 
 def build_api(
     repository: Repository,
@@ -329,7 +352,7 @@ def build_api(
         enable_liquidation_levels: bool = Query(default=True),
         enable_round_number_levels: bool = Query(default=True),
         enable_tick_velocity_alerts: bool = Query(default=True),
-        tick_velocity_alert_multiplier: float = Query(default=8.0, ge=1.0, le=15.0),
+        tick_qty_per_5s: int = Query(default=40, ge=10, le=200),
         enable_time_stop_alerts: bool = Query(default=True),
         time_stop_minutes: int = Query(default=3, ge=1, le=15),
         time_stop_min_move_pct: float = Query(default=1.0, ge=0.1, le=10.0),
@@ -365,7 +388,7 @@ def build_api(
             enable_liquidation_levels=enable_liquidation_levels,
             enable_round_number_levels=enable_round_number_levels,
             enable_tick_velocity_alerts=enable_tick_velocity_alerts,
-            tick_velocity_alert_multiplier=tick_velocity_alert_multiplier,
+            tick_qty_per_5s=tick_qty_per_5s,
             enable_time_stop_alerts=enable_time_stop_alerts,
             time_stop_minutes=time_stop_minutes,
             time_stop_min_move_pct=time_stop_min_move_pct,
@@ -1034,6 +1057,17 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
     .badge.danger {{ background: rgba(255, 107, 107, 0.14); color: #ffb3b3; border-color: rgba(255, 107, 107, 0.25); }}
     .badge.accent {{ background: rgba(140, 217, 255, 0.14); color: #a8e8ff; border-color: rgba(140, 217, 255, 0.25); }}
     .badge.neutral {{ background: rgba(126, 160, 185, 0.14); color: #c6d6e3; border-color: rgba(126, 160, 185, 0.24); }}
+    .badge.badge-actionable {{ background: rgba(73, 210, 154, 0.18); color: #b6ffd9; border-color: rgba(73, 210, 154, 0.42); }}
+    .badge.badge-watchlist, .badge.badge-watch {{ background: rgba(255, 209, 102, 0.16); color: #ffe29a; border-color: rgba(255, 209, 102, 0.32); }}
+    .badge.badge-pre-alert {{ background: rgba(119, 161, 255, 0.18); color: #cadbff; border-color: rgba(119, 161, 255, 0.34); }}
+    .badge.badge-arming {{ background: rgba(169, 118, 255, 0.18); color: #dfc9ff; border-color: rgba(169, 118, 255, 0.34); }}
+    .badge.badge-monitor {{ background: rgba(83, 203, 255, 0.16); color: #bdeeff; border-color: rgba(83, 203, 255, 0.3); }}
+    .badge.badge-cold {{ background: rgba(126, 160, 185, 0.14); color: #c6d6e3; border-color: rgba(126, 160, 185, 0.24); }}
+    .badge.badge-stale, .badge.badge-loss, .badge.badge-invalidation, .badge.badge-offline {{ background: rgba(255, 107, 107, 0.18); color: #ffc3c3; border-color: rgba(255, 107, 107, 0.34); }}
+    .badge.badge-insufficient {{ background: rgba(104, 116, 130, 0.18); color: #d3dce5; border-color: rgba(104, 116, 130, 0.34); }}
+    .badge.badge-executed {{ background: rgba(255, 145, 77, 0.18); color: #ffd2ae; border-color: rgba(255, 145, 77, 0.34); }}
+    .badge.badge-tp1 {{ background: rgba(91, 228, 168, 0.16); color: #c4ffe2; border-color: rgba(91, 228, 168, 0.32); }}
+    .badge.badge-tp2 {{ background: rgba(63, 222, 129, 0.18); color: #d3ffea; border-color: rgba(63, 222, 129, 0.36); }}
     .table-wrap {{
       overflow: auto;
       border-radius: 16px;
@@ -1351,15 +1385,17 @@ def _metric_card(title: str, value: str, note: str) -> str:
 
 
 def _status_badge(status: str) -> str:
-    label = STATUS_LABELS.get(status, status)
+    label = UI_STATUS_LABELS.get(status, status)
     tone = STATUS_TONES.get(status, "neutral")
-    return f'<span class="badge {tone}">{escape(label)}</span>'
+    variant = status.lower().replace("_", "-")
+    return f'<span class="badge {tone} badge-{escape(variant)}">{escape(label)}</span>'
 
 
 def _outcome_badge(status: str) -> str:
-    label = OUTCOME_LABELS.get(status, status)
+    label = UI_OUTCOME_LABELS.get(status, status)
     tone = OUTCOME_TONES.get(status, "neutral")
-    return f'<span class="badge {tone}">{escape(label)}</span>'
+    variant = status.lower().replace("_", "-")
+    return f'<span class="badge {tone} badge-{escape(variant)}">{escape(label)}</span>'
 
 
 def _opportunities_table(rows: list, local_tz: ZoneInfo) -> str:
@@ -1666,7 +1702,7 @@ def _setups_filter_form(
     options = ['<option value="all" ' + selected["all"] + '>All statuses</option>']
     for value in available_statuses:
         current = "selected" if status == value else ""
-        label = OUTCOME_LABELS.get(value, value.replace("_", " ").title())
+        label = UI_OUTCOME_LABELS.get(value, value.replace("_", " ").title())
         options.append(f'<option value="{escape(value)}" {current}>{escape(label)}</option>')
     return f"""
     <form class="manual-form" method="get" action="/setups">
@@ -1740,8 +1776,8 @@ STRATEGY_FIELD_HELP = {
     "btc_correlation_threshold": "How strong BTC/ETH bullish pressure must be before the short filter activates. Lower is stricter.",
     "enable_liquidation_levels": "Allow liquidation-cluster levels to participate in level selection and scoring.",
     "enable_round_number_levels": "Allow round-number levels and round-number book density confluence in scoring.",
-    "enable_tick_velocity_alerts": "Enable tick-velocity breakout confirmation and separate velocity alerts.",
-    "tick_velocity_alert_multiplier": "How many times faster the tape must print versus the 10-minute baseline.",
+    "enable_tick_velocity_alerts": "Enable tick-quantity breakout confirmation and separate order-flow alerts.",
+    "tick_qty_per_5s": "Minimum number of trades that must print in the last 5 seconds before the tape is considered truly fast.",
     "enable_time_stop_alerts": "Send a close-by-market alert when the breakout does not move fast enough after activation.",
     "time_stop_minutes": "Minutes to wait before declaring the breakout too slow.",
     "time_stop_min_move_pct": "Minimum favorable move, in percent, required to avoid the time-stop alert.",
@@ -1824,7 +1860,7 @@ def _runtime_settings_form(
         _strategy_toggle('enable_liquidation_levels', 'enable_liquidation_levels', strategy_config.enable_liquidation_levels, tooltip=STRATEGY_FIELD_HELP['enable_liquidation_levels']),
         _strategy_toggle('enable_round_number_levels', 'enable_round_number_levels', strategy_config.enable_round_number_levels, tooltip=STRATEGY_FIELD_HELP['enable_round_number_levels']),
         _strategy_toggle('enable_tick_velocity_alerts', 'enable_tick_velocity_alerts', strategy_config.enable_tick_velocity_alerts, tooltip=STRATEGY_FIELD_HELP['enable_tick_velocity_alerts']),
-        _strategy_input('tick_velocity_alert_multiplier', 'tick_velocity_alert_multiplier', f'{strategy_config.tick_velocity_alert_multiplier:.2f}', tooltip=STRATEGY_FIELD_HELP['tick_velocity_alert_multiplier'], min_value='1.0', max_value='15.0', step='0.05'),
+        _strategy_input('tick_qty_per_5s', 'tick_qty_per_5s', str(strategy_config.tick_qty_per_5s), tooltip=STRATEGY_FIELD_HELP['tick_qty_per_5s'], min_value='10', max_value='200', step='1'),
         _strategy_toggle('enable_time_stop_alerts', 'enable_time_stop_alerts', strategy_config.enable_time_stop_alerts, tooltip=STRATEGY_FIELD_HELP['enable_time_stop_alerts']),
         _strategy_input('time_stop_minutes', 'time_stop_minutes', str(strategy_config.time_stop_minutes), tooltip=STRATEGY_FIELD_HELP['time_stop_minutes'], min_value='1', max_value='15', step='1'),
         _strategy_input('time_stop_min_move_pct', 'time_stop_min_move_pct', f'{strategy_config.time_stop_min_move_pct:.2f}', tooltip=STRATEGY_FIELD_HELP['time_stop_min_move_pct'], min_value='0.1', max_value='10', step='0.1'),

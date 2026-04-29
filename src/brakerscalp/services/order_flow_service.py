@@ -70,7 +70,7 @@ class OrderFlowAnalyzerService:
         await self.cache.store_order_flow_snapshot(venue, item.symbol, snapshot)
         if not strategy.enable_tick_velocity_alerts:
             return 0
-        if snapshot.tick_velocity_ratio < strategy.tick_velocity_alert_multiplier:
+        if snapshot.tick_qty_per_5s < strategy.tick_qty_per_5s:
             return 0
         minute_bucket = datetime.now(tz=timezone.utc).strftime("%Y%m%d%H%M")
         dedupe_key = f"{venue}:{item.symbol}:{minute_bucket}"
@@ -80,8 +80,7 @@ class OrderFlowAnalyzerService:
         text = (
             f"⚡ {item.symbol} | TICK VELOCITY\n"
             f"#ORDERFLOW #{self._coin_hashtag(item.symbol)}\n"
-            f"Velocity: {snapshot.tick_velocity_ratio:.2f}x of baseline\n"
-            f"Recent trades: {snapshot.recent_trade_count} / 30s\n"
+            f"Ticks / 5s: {snapshot.tick_qty_per_5s}\n"
             f"Delta ratio: {snapshot.delta_ratio:.2f}\n"
             f"CVD slope: {snapshot.cvd_slope:.2f}\n"
             f"Price: {current_price:.4f}"

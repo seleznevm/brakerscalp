@@ -38,7 +38,7 @@ def compute_order_flow_snapshot(
     trades: list[TradeTick],
     *,
     now: datetime | None = None,
-    recent_seconds: int = 30,
+    recent_seconds: int = 5,
     baseline_seconds: int = 600,
     min_baseline_trades: int = 20,
 ) -> OrderFlowSnapshot:
@@ -58,14 +58,6 @@ def compute_order_flow_snapshot(
         baseline_reference_trades = historical[-min(len(historical), 240):]
     recent_trade_count = len(recent_trades)
     baseline_trade_count = len(baseline_reference_trades)
-    tick_velocity = recent_trade_count / max(recent_seconds, 1)
-    baseline_window_seconds = max(baseline_seconds - recent_seconds, 1)
-    if baseline_trade_count < min_baseline_trades:
-        baseline_tick_velocity = 0.0
-        tick_velocity_ratio = 0.0
-    else:
-        baseline_tick_velocity = baseline_trade_count / baseline_window_seconds
-        tick_velocity_ratio = tick_velocity / max(baseline_tick_velocity, 1e-9)
 
     total_notional = 0.0
     delta_notional = 0.0
@@ -88,9 +80,8 @@ def compute_order_flow_snapshot(
         timestamp=reference_now,
         delta_ratio=delta_ratio,
         cvd_slope=cvd_slope,
-        tick_velocity=tick_velocity,
-        baseline_tick_velocity=baseline_tick_velocity,
-        tick_velocity_ratio=tick_velocity_ratio,
+        tick_qty_per_5s=recent_trade_count,
+        tick_window_seconds=recent_seconds,
         recent_trade_count=recent_trade_count,
         baseline_trade_count=baseline_trade_count,
     )
