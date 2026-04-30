@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from brakerscalp.domain.models import Timeframe, UniverseSymbol, Venue
 from brakerscalp.services.engine_service import EngineService
+from brakerscalp.storage.models import SignalRecord
 
 
 async def test_engine_generates_alert(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
@@ -124,3 +127,43 @@ async def test_engine_uses_runtime_universe_from_cache(repository, cache, make_b
 
     assert alerts
     assert alerts[0].symbol == "ETHUSDT"
+
+
+async def test_engine_respects_configured_duplicate_window(repository, cache, make_breakout_market, make_book, make_health, make_derivatives, make_trades) -> None:
+    universe = [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)]
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market()
+
+    await cache.store_candles("binance", "BTCUSDT", "4h", candles_4h)
+    await cache.store_candles("binance", "BTCUSDT", "1h", candles_1h)
+    await cache.store_candles("binance", "BTCUSDT", "15m", candles_15m)
+    await cache.store_candles("binance", "BTCUSDT", "5m", candles_5m)
+    await cache.store_book("binance", "BTCUSDT", make_book())
+    await cache.store_trades("binance", "BTCUSDT", make_trades(start_price=candles_5m[-1].close - 60.0))
+    await cache.store_derivative_context("binance", "BTCUSDT", make_derivatives())
+    await cache.store_health("binance", "BTCUSDT", make_health())
+    await cache.store_health("bybit", "BTCUSDT", make_health(venue=Venue.BYBIT))
+    await cache.store_health("okx", "BTCUSDT", make_health(venue=Venue.OKX))
+
+    service = EngineService(
+        repository,
+        cache,
+        universe,
+        alert_chat_ids=[123],
+        interval_seconds=1,
+        signal_duplicate_window_minutes=180,
+    )
+    await service.run_once()
+    first_signal = (await repository.list_latest_alerts(limit=1))[0]
+    await cache.pop_alert(timeout=1)
+
+    async with repository.session_factory() as session:
+        stored = await session.get(SignalRecord, first_signal.id)
+        assert stored is not None
+        stored.detected_at = datetime.now(tz=timezone.utc) - timedelta(minutes=181)
+        await session.commit()
+    await cache.redis.delete(cache._key("dedupe", first_signal.alert_key))
+
+    await service.run_once()
+    second_alert = await cache.pop_alert(timeout=1)
+
+    assert second_alert is not None

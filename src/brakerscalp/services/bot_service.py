@@ -432,7 +432,12 @@ class BotService:
             return ZoneInfo("UTC")
 
     async def _send_alert_bundle(self, alert: AlertMessage) -> None:
-        chart_bytes, chart_caption = await self._build_alert_chart(alert.signal_id)
+        chart_bytes: bytes | None = None
+        chart_caption: str | None = None
+        try:
+            chart_bytes, chart_caption = await self._build_alert_chart(alert.signal_id)
+        except Exception as exc:
+            self.logger.warning("bot-chart-render-fallback", signal_id=alert.signal_id, error=str(exc))
         try:
             await self._deliver_alert_bundle(
                 chat_id=alert.chat_id,
@@ -470,13 +475,21 @@ class BotService:
         chart_caption: str | None,
     ) -> None:
         if chart_bytes is not None and chart_caption is not None:
-            chart_file = BufferedInputFile(chart_bytes, filename="signal-chart.png")
-            await self.bot.send_photo(
-                chat_id,
-                photo=chart_file,
-                caption=chart_caption,
-                message_thread_id=message_thread_id,
-            )
+            try:
+                chart_file = BufferedInputFile(chart_bytes, filename="signal-chart.png")
+                await self.bot.send_photo(
+                    chat_id,
+                    photo=chart_file,
+                    caption=chart_caption,
+                    message_thread_id=message_thread_id,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "bot-photo-send-fallback",
+                    chat_id=chat_id,
+                    message_thread_id=message_thread_id,
+                    error=str(exc),
+                )
         await self.bot.send_message(
             chat_id,
             text,

@@ -105,7 +105,7 @@ class OrderFlowAnalyzerService:
             for signal in signals:
                 lifecycle = await self._signal_lifecycle(signal, now)
                 previous_status = await self.cache.get_signal_lifecycle_status(signal.decision_id)
-                if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status):
+                if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status, now=now):
                     count += 1
                 await self.cache.set_signal_lifecycle_status(signal.decision_id, lifecycle.status)
             return count
@@ -119,7 +119,7 @@ class OrderFlowAnalyzerService:
         for signal in signals:
             lifecycle = await self._signal_lifecycle(signal, now)
             previous_status = await self.cache.get_signal_lifecycle_status(signal.decision_id)
-            if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status):
+            if await self._maybe_send_executed(signal, lifecycle, previous_status=previous_status, now=now):
                 count += 1
             if await self._maybe_send_breakeven(signal, strategy, now, lifecycle=lifecycle):
                 count += 1
@@ -134,12 +134,13 @@ class OrderFlowAnalyzerService:
         lifecycle: SetupLifecycle,
         *,
         previous_status: str | None,
+        now: datetime,
     ) -> bool:
         if lifecycle.status != SETUP_STATUS_EXECUTED or lifecycle.entry_at is None:
             return False
         if previous_status == SETUP_STATUS_EXECUTED:
             return False
-        if previous_status is None and str((signal.render_context or {}).get("setup_stage", "")) == "activated":
+        if previous_status is None and lifecycle.entry_at < now - timedelta(minutes=30):
             return False
         dedupe_key = f"{signal.decision_id}:executed"
         if not await self.cache.acquire_once_key("management-alert", dedupe_key, ttl_seconds=172800):

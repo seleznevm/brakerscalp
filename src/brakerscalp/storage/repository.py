@@ -312,6 +312,31 @@ class Repository:
             result = await session.execute(stmt)
             return list(result.scalars())
 
+    async def list_signals_for_symbols(
+        self,
+        symbols: list[str],
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        signal_classes: list[str] | None = None,
+    ) -> list[SignalRecord]:
+        if not symbols:
+            return []
+        async with self.session_factory() as session:
+            stmt = (
+                select(SignalRecord)
+                .where(SignalRecord.symbol.in_(symbols))
+                .order_by(SignalRecord.detected_at.asc())
+            )
+            if start_at is not None:
+                stmt = stmt.where(SignalRecord.detected_at >= start_at)
+            if end_at is not None:
+                stmt = stmt.where(SignalRecord.detected_at < end_at)
+            if signal_classes:
+                stmt = stmt.where(SignalRecord.signal_class.in_(signal_classes))
+            result = await session.execute(stmt)
+            return list(result.scalars())
+
     async def list_latest_deliveries(self, limit: int = 20) -> list[AlertDeliveryRecord]:
         async with self.session_factory() as session:
             result = await session.execute(select(AlertDeliveryRecord).order_by(desc(AlertDeliveryRecord.updated_at)).limit(limit))

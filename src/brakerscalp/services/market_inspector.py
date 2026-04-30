@@ -33,6 +33,8 @@ class ManualScanResult:
 class SetupCard:
     signal: SignalRecord
     lifecycle: SetupLifecycle
+    symbol_wins: int = 0
+    symbol_losses: int = 0
 
 
 @dataclass(slots=True)
@@ -212,6 +214,11 @@ class MarketInspector:
             if outcome_filter != "all" and lifecycle.status != outcome_filter:
                 continue
             cards.append(SetupCard(signal=signal, lifecycle=lifecycle))
+        win_loss = await self._symbol_win_loss_map({item.signal.symbol for item in cards}, analysis_end=end_at)
+        for item in cards:
+            wins, losses = win_loss.get(item.signal.symbol, (0, 0))
+            item.symbol_wins = wins
+            item.symbol_losses = losses
         outcome_order = {"watch": 0, "executed": 1, "tp1": 2, "tp2": 3, "loss": 4, "invalidation": 5}
         cards = sorted(cards, key=lambda item: (outcome_order.get(item.lifecycle.status, 9), -item.lifecycle.call_at.timestamp()))
         return cards[:limit]
@@ -535,6 +542,33 @@ class MarketInspector:
             "insufficient": 7,
         }
         return (order.get(item.status, 9), -item.confidence, -int(item.updated_at.timestamp()))
+
+    async def _symbol_win_loss_map(
+        self,
+        symbols: set[str],
+        *,
+        analysis_end: datetime,
+        lookback_days: int = 180,
+    ) -> dict[str, tuple[int, int]]:
+        if not symbols:
+            return {}
+        signals = await self.repository.list_signals_for_symbols(
+            sorted(symbols),
+            start_at=analysis_end - timedelta(days=lookback_days),
+            end_at=analysis_end,
+            signal_classes=["actionable", "watchlist", "pre_alert"],
+        )
+        grouped_signals = self._group_signals_by_setup(signals)
+        counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        for group in grouped_signals.values():
+            signal = group[0]
+            candles = await self.repository.get_candles_between(signal.venue, signal.symbol, signal.timeframe, signal.detected_at, analysis_end)
+            lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=analysis_end)
+            if lifecycle.status in {"tp1", "tp2"}:
+                counts[signal.symbol][0] += 1
+            elif lifecycle.status in {"loss", "invalidation"}:
+                counts[signal.symbol][1] += 1
+        return {symbol: (values[0], values[1]) for symbol, values in counts.items()}
 
     async def _runtime_strategy_config(self) -> StrategyRuntimeConfig:
         if hasattr(self.cache, "get_strategy_config"):

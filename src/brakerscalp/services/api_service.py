@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from io import BytesIO
@@ -271,16 +272,31 @@ def build_api(
         threshold_saved: int = 0,
         risk_saved: int = 0,
         strategy_saved: str | None = None,
+        strategy_exported: str | None = None,
+        import_file: str | None = None,
+        strategy_loaded: int = 0,
+        import_error: str | None = None,
         manage_symbol: str | None = None,
         universe_saved: str | None = None,
     ) -> HTMLResponse:
         scan = await inspector.manual_scan(symbol) if symbol else None
         minimum_alert_confidence = await _current_minimum_alert_confidence(cache, settings)
         risk_usdt = await _current_risk_usdt(cache, settings)
-        strategy_config = await _current_strategy_config(cache, settings)
+        runtime_strategy_config = await _current_strategy_config(cache, settings)
+        strategy_files = _list_strategy_presets(settings)
+        imported_strategy_config, import_failure = _load_strategy_preset(settings, import_file) if import_file else (None, None)
+        strategy_config = imported_strategy_config or runtime_strategy_config
         manual_card = _manual_scan_card(symbol, scan, local_tz) if symbol else _manual_scan_form("")
         runtime_universe = await inspector.list_universe()
         discovered_symbol, venue_probes = await inspector.discover_symbol_venues(manage_symbol or "") if manage_symbol else ("", [])
+        dialogs = "".join(
+            block
+            for block in [
+                _strategy_export_dialog(strategy_exported),
+                _strategy_import_result_dialog(import_file, bool(strategy_loaded), import_error or import_failure),
+            ]
+            if block
+        )
         body = f"""
         <section class="hero compact">
           <div>
@@ -296,7 +312,7 @@ def build_api(
               <a href="/debug/runtime-config">JSON</a>
             </div>
             {_settings_table(settings, minimum_alert_confidence, risk_usdt)}
-            {_runtime_settings_form(minimum_alert_confidence, risk_usdt, strategy_config, threshold_saved=bool(threshold_saved), risk_saved=bool(risk_saved), strategy_saved=strategy_saved)}
+            {_runtime_settings_form(minimum_alert_confidence, risk_usdt, strategy_config, settings, strategy_files, imported_filename=import_file, threshold_saved=bool(threshold_saved), risk_saved=bool(risk_saved), strategy_saved=strategy_saved)}
           </div>
           <div class="panel">
             <div class="panel-head">
@@ -309,6 +325,7 @@ def build_api(
             {_universe_table(runtime_universe)}
           </div>
         </section>
+        {dialogs}
         """
         return HTMLResponse(_page("Настройки", "settings", body, refresh_seconds=None))
 
@@ -402,6 +419,23 @@ def build_api(
     async def strategy_defaults() -> RedirectResponse:
         await cache.set_strategy_config(settings.default_strategy_config())
         return RedirectResponse(url="/settings?strategy_saved=defaults", status_code=303)
+
+    @app.get("/settings/export-strategy")
+    async def export_strategy() -> RedirectResponse:
+        strategy_config = await _current_strategy_config(cache, settings)
+        filename = _export_strategy_preset(settings, strategy_config)
+        return RedirectResponse(url=f"/settings?strategy_exported={quote_plus(filename)}", status_code=303)
+
+    @app.get("/settings/import-strategy")
+    async def import_strategy(filename: str) -> RedirectResponse:
+        imported, error = _load_strategy_preset(settings, filename)
+        if imported is None:
+            encoded_error = quote_plus(error or "Import failed.")
+            return RedirectResponse(url=f"/settings?import_error={encoded_error}", status_code=303)
+        return RedirectResponse(
+            url=f"/settings?import_file={quote_plus(filename)}&strategy_loaded=1",
+            status_code=303,
+        )
 
     @app.get("/settings/universe/add")
     async def add_universe_symbol(symbol: str, venue: str) -> RedirectResponse:
@@ -1119,6 +1153,22 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       font-size: 13px;
       line-height: 1.45;
     }}
+    .wl-inline {{
+      margin-top: 8px;
+    }}
+    .wl-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .wl-badge .win {{ color: #7ef0b0; }}
+    .wl-badge .loss {{ color: #ff8e8e; }}
     .setup-card img {{
       width: 100%;
       display: block;
@@ -1218,6 +1268,10 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
       font-weight: 700;
       white-space: nowrap;
     }}
+    .button-link-button {{
+      cursor: pointer;
+      font: inherit;
+    }}
     .manual-form select {{
       color-scheme: dark;
     }}
@@ -1276,6 +1330,28 @@ def _page(title: str, active_tab: str, body: str, refresh_seconds: int | None) -
     .strategy-actions .button-link {{
       min-height: 42px;
       padding: 10px 16px;
+    }}
+    .modal-shell {{
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 0;
+      background: transparent;
+      color: var(--text);
+      max-width: 520px;
+      width: calc(100vw - 32px);
+    }}
+    .modal-shell::backdrop {{
+      background: rgba(4, 12, 18, 0.72);
+      backdrop-filter: blur(4px);
+    }}
+    .dialog-card {{
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 22px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(18, 31, 44, 0.98), rgba(9, 17, 26, 0.98));
+      min-width: 0;
     }}
     .sort-link {{
       color: inherit;
@@ -1507,12 +1583,14 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
         else f"{tp1_value:.4f} / {tp2_value:.4f}"
     )
     meta = f"Signal class: {escape(signal.signal_class.upper())}" if include_meta else escape(signal.signal_class.upper())
+    win_loss = f'<span class="wl-badge"><span class="win">{item.symbol_wins}</span> | <span class="loss">{item.symbol_losses}</span></span>'
     return f"""
     <article class="setup-card">
       <div class="top">
         <div>
           <h3>{escape(signal.symbol)} · {escape(signal.setup.upper())} · {escape(signal.direction.upper())}</h3>
           <div class="meta">{meta}</div>
+          <div class="wl-inline">{win_loss}</div>
         </div>
         <div>{_outcome_badge(lifecycle.status)}</div>
       </div>
@@ -1786,6 +1864,47 @@ STRATEGY_FIELD_HELP = {
 }
 
 
+def _strategy_preset_dir(settings: Settings):
+    base_dir = settings.universe_path.parent if getattr(settings, "universe_path", None) else None
+    if base_dir is None:
+        raise ValueError("Strategy preset directory is not configured.")
+    return base_dir / "strategy_presets"
+
+
+def _list_strategy_presets(settings: Settings) -> list[str]:
+    preset_dir = _strategy_preset_dir(settings)
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    return sorted((item.name for item in preset_dir.glob("Strategy_config_*.json") if item.is_file()), reverse=True)
+
+
+def _export_strategy_preset(settings: Settings, strategy_config: StrategyRuntimeConfig) -> str:
+    preset_dir = _strategy_preset_dir(settings)
+    preset_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"Strategy_config_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+    target = preset_dir / filename
+    target.write_text(
+        json.dumps(strategy_config.model_dump(mode="json"), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return filename
+
+
+def _load_strategy_preset(settings: Settings, filename: str | None) -> tuple[StrategyRuntimeConfig | None, str | None]:
+    if not filename:
+        return None, None
+    safe_name = filename.split("/")[-1].split("\\")[-1]
+    if not safe_name.endswith(".json"):
+        return None, "Unsupported strategy preset format."
+    target = _strategy_preset_dir(settings) / safe_name
+    if not target.exists() or not target.is_file():
+        return None, "Strategy preset file was not found."
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        return StrategyRuntimeConfig.model_validate(payload), None
+    except Exception as exc:
+        return None, f"Import failed: {type(exc).__name__}: {exc}"
+
+
 def _strategy_input(name: str, label: str, value: str, *, tooltip: str, min_value: str | None = None, max_value: str | None = None, step: str | None = None) -> str:
     attrs = []
     if min_value is not None:
@@ -1819,7 +1938,10 @@ def _runtime_settings_form(
     minimum_alert_confidence: float,
     risk_usdt: float,
     strategy_config: StrategyRuntimeConfig,
+    settings: Settings,
+    strategy_files: list[str],
     *,
+    imported_filename: str | None,
     threshold_saved: bool,
     risk_saved: bool,
     strategy_saved: str | None,
@@ -1831,6 +1953,8 @@ def _runtime_settings_form(
         strategy_message = '<div class="muted">Strategy runtime settings saved. Engine and screener will use them on the next cycle.</div>'
     elif strategy_saved == "defaults":
         strategy_message = '<div class="muted">Default strategy values restored.</div>'
+    elif imported_filename:
+        strategy_message = f'<div class="muted">Imported preset loaded into the form: <code>{escape(imported_filename)}</code>. Click Apply to activate it.</div>'
     strategy_fields = ''.join([
         f"""<label class="field-block"><span class="tooltip-anchor" data-tooltip="{escape(STRATEGY_FIELD_HELP['timeframe'])}">Timeframe</span><select name="timeframe"><option value="5m" {'selected' if strategy_config.timeframe.value == '5m' else ''}>5m</option><option value="15m" {'selected' if strategy_config.timeframe.value == '15m' else ''}>15m</option></select></label>""",
         _strategy_input('minimum_expected_rr', 'Min expected R:R', f'{strategy_config.minimum_expected_rr:.2f}', tooltip=STRATEGY_FIELD_HELP['minimum_expected_rr'], min_value='1', max_value='10', step='0.1'),
@@ -1890,10 +2014,82 @@ def _runtime_settings_form(
         <div class="strategy-actions">
           <button type="submit">Apply</button>
           <a class="button-link" href="/settings/strategy-defaults">By default</a>
+          <a class="button-link" href="/settings/export-strategy">Export</a>
+          <button type="button" class="button-link button-link-button" onclick="document.getElementById('strategy-import-dialog').showModal()">Import</button>
         </div>
       </form>
+      {_strategy_import_dialog(settings, strategy_files, imported_filename)}
       {strategy_message}
     </div>
+    """
+
+
+def _strategy_import_dialog(settings: Settings, strategy_files: list[str], imported_filename: str | None) -> str:
+    options = []
+    for filename in strategy_files:
+        selected = "selected" if filename == imported_filename else ""
+        options.append(f'<option value="{escape(filename)}" {selected}>{escape(filename)}</option>')
+    options_html = "".join(options) or '<option value="">No saved presets</option>'
+    disabled = "disabled" if not strategy_files else ""
+    return f"""
+    <dialog id="strategy-import-dialog" class="modal-shell">
+      <form method="get" action="/settings/import-strategy" class="dialog-card">
+        <h3>Import Strategy Runtime</h3>
+        <div class="muted">Select a previously exported preset file. The values will be loaded into the form fields.</div>
+        <label class="field-block">
+          <span>Preset file</span>
+          <select name="filename" {disabled}>{options_html}</select>
+        </label>
+        <div class="strategy-actions">
+          <button type="submit" {disabled}>OK</button>
+          <button type="button" class="button-link button-link-button" onclick="this.closest('dialog').close()">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+    """
+
+
+def _strategy_export_dialog(filename: str | None) -> str:
+    if not filename:
+        return ""
+    return f"""
+    <dialog class="modal-shell" open>
+      <form method="dialog" class="dialog-card">
+        <h3>Export completed</h3>
+        <div class="muted">Strategy runtime was saved to file <code>{escape(filename)}</code>.</div>
+        <div class="strategy-actions">
+          <button autofocus>OK</button>
+        </div>
+      </form>
+    </dialog>
+    """
+
+
+def _strategy_import_result_dialog(filename: str | None, loaded: bool, error: str | None) -> str:
+    if error:
+        return f"""
+        <dialog class="modal-shell" open>
+          <form method="dialog" class="dialog-card">
+            <h3>Import failed</h3>
+            <div class="muted">{escape(error)}</div>
+            <div class="strategy-actions">
+              <button autofocus>OK</button>
+            </div>
+          </form>
+        </dialog>
+        """
+    if not filename or not loaded:
+        return ""
+    return f"""
+    <dialog class="modal-shell" open>
+      <form method="dialog" class="dialog-card">
+        <h3>Import completed</h3>
+        <div class="muted">Preset <code>{escape(filename)}</code> was loaded into the form. Click Apply to activate it.</div>
+        <div class="strategy-actions">
+          <button autofocus>OK</button>
+        </div>
+      </form>
+    </dialog>
     """
 
 

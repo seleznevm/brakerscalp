@@ -138,7 +138,7 @@ class EngineService:
             setup=decision.setup.value,
             direction=decision.direction.value,
             level_id=decision.level_id,
-            within_minutes=max(self.signal_duplicate_window_minutes, 480),
+            within_minutes=max(self.signal_duplicate_window_minutes, 1),
             setup_stage=str(decision.render_context.get("setup_stage", "")),
         )
         if duplicate is not None:
@@ -163,7 +163,7 @@ class EngineService:
             )
         elif decision.signal_class != SignalClass.SUPPRESSED and await self.cache.acquire_alert_key(
             decision.alert_key,
-            ttl_seconds=self.signal_dedupe_ttl_seconds,
+            ttl_seconds=self._alert_dedupe_ttl_seconds(),
         ):
             for chat_id in self.alert_chat_ids:
                 alert = to_alert_message(decision, chat_id, message_thread_id=self.alert_message_thread_id)
@@ -211,3 +211,7 @@ class EngineService:
             if candles:
                 benchmarks[symbol] = candles
         return benchmarks
+
+    def _alert_dedupe_ttl_seconds(self) -> int:
+        configured_window = max(self.signal_duplicate_window_minutes * 60, 300)
+        return max(300, min(self.signal_dedupe_ttl_seconds, configured_window))

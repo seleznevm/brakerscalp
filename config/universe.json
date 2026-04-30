@@ -1,81 +1,312 @@
 {
   "symbols": [
-    {"symbol": "BTCUSDT", "primary_venue": "binance"},
-    {"symbol": "ETHUSDT", "primary_venue": "binance"},
-    {"symbol": "SOLUSDT", "primary_venue": "binance"},
-    {"symbol": "BNBUSDT", "primary_venue": "binance"},
-    {"symbol": "XRPUSDT", "primary_venue": "binance"},
-    {"symbol": "DOGEUSDT", "primary_venue": "binance"},
-    {"symbol": "ADAUSDT", "primary_venue": "binance"},
-    {"symbol": "AVAXUSDT", "primary_venue": "binance"},
-    {"symbol": "LINKUSDT", "primary_venue": "binance"},
-    {"symbol": "TRXUSDT", "primary_venue": "binance"},
-    {"symbol": "DOTUSDT", "primary_venue": "bybit"},
-    {"symbol": "LTCUSDT", "primary_venue": "bybit"},
-    {"symbol": "BCHUSDT", "primary_venue": "bybit"},
-    {"symbol": "NEARUSDT", "primary_venue": "bybit"},
-    {"symbol": "ATOMUSDT", "primary_venue": "bybit"},
-    {"symbol": "APTUSDT", "primary_venue": "bybit"},
-    {"symbol": "ARBUSDT", "primary_venue": "bybit"},
-    {"symbol": "OPUSDT", "primary_venue": "bybit"},
-    {"symbol": "WIFUSDT", "primary_venue": "bybit"},
-    {"symbol": "PEPEUSDT", "primary_venue": "bybit"},
-    {"symbol": "SUIUSDT", "primary_venue": "okx"},
-    {"symbol": "TONUSDT", "primary_venue": "okx"},
-    {"symbol": "UNIUSDT", "primary_venue": "okx"},
-    {"symbol": "ETCUSDT", "primary_venue": "okx"},
-    {"symbol": "FILUSDT", "primary_venue": "okx"},
-    {"symbol": "MATICUSDT", "primary_venue": "okx"},
-    {"symbol": "AAVEUSDT", "primary_venue": "okx"},
-    {"symbol": "SEIUSDT", "primary_venue": "okx"},
-    {"symbol": "TIAUSDT", "primary_venue": "okx"},
-    {"symbol": "SKYAIUSDT", "primary_venue": "bybit"},
-    {"symbol": "TAGUSDT", "primary_venue": "bybit"},
-    {"symbol": "TACUSDT", "primary_venue": "bybit"},
-    {"symbol": "TSTUSDT", "primary_venue": "bybit"},
-    {"symbol": "PRLUSDT", "primary_venue": "bybit"},
-    {"symbol": "XLMUSDT", "primary_venue": "bybit"},
-    {"symbol": "SIRENUSDT", "primary_venue": "bybit"},
-    {"symbol": "ORDUSDT", "primary_venue": "bybit"},
-    {"symbol": "ZECUSDT", "primary_venue": "bybit"},
-    {"symbol": "HYPEUSDT", "primary_venue": "bybit"},
-    {"symbol": "PENGUUSDT", "primary_venue": "bybit"},
-    {"symbol": "PUMPUSDT", "primary_venue": "bybit"},
-    {"symbol": "CHIPUSDT", "primary_venue": "bybit"},
-    {"symbol": "HUSDT", "primary_venue": "bybit"},
-    {"symbol": "MYXUSDT", "primary_venue": "bybit"},
-    {"symbol": "PIPPINUSDT", "primary_venue": "bybit"},
-    {"symbol": "RIVERUSDT", "primary_venue": "bybit"},
-    {"symbol": "TRADOORUSDT", "primary_venue": "bybit"},
-    {"symbol": "FETUSDT", "primary_venue": "bybit"},
-    {"symbol": "ASTERUSDT", "primary_venue": "bybit"},
-    {"symbol": "TRUMPUSDT", "primary_venue": "bybit"},
-    {"symbol": "CHZUSDT", "primary_venue": "bybit"},
-    {"symbol": "HBARUSDT", "primary_venue": "bybit"},
-    {"symbol": "ALGOUSDT", "primary_venue": "bybit"},
-    {"symbol": "XMRUSDT", "primary_venue": "bybit"},
-    {"symbol": "ONDOUSDT", "primary_venue": "bybit"},
-    {"symbol": "JUPUSDT", "primary_venue": "bybit"},
-    {"symbol": "BEATUSDT", "primary_venue": "bybit"},
-    {"symbol": "PIXELUSDT", "primary_venue": "bybit"},
-    {"symbol": "VIRTUALUSDT", "primary_venue": "bybit"},
-    {"symbol": "HOODUSDT", "primary_venue": "bybit"},
-    {"symbol": "ZROUSDT", "primary_venue": "bybit"},
-    {"symbol": "STOUSDT", "primary_venue": "bybit"},
-    {"symbol": "FLOKIUSDT", "primary_venue": "bybit"},
-    {"symbol": "DASHUSDT", "primary_venue": "bybit"},
-    {"symbol": "JASMYUSDT", "primary_venue": "bybit"},
-    {"symbol": "ICPUSDT", "primary_venue": "bybit"},
-    {"symbol": "XAIUSDT", "primary_venue": "bybit"},
-    {"symbol": "XPLUSDT", "primary_venue": "bybit"},
-    {"symbol": "ENSOUSDT", "primary_venue": "bybit"},
-    {"symbol": "SPXUSDT", "primary_venue": "bybit"},
-    {"symbol": "STRKUSDT", "primary_venue": "bybit"},
-    {"symbol": "BULLAUSDT", "primary_venue": "bybit"},
-    {"symbol": "POLUSDT", "primary_venue": "bybit"},
-    {"symbol": "ZENUSDT", "primary_venue": "bybit"},
-    {"symbol": "FOLKUSDT", "primary_venue": "bybit"},
-    {"symbol": "LIGHTUSDT", "primary_venue": "bybit"},
-    {"symbol": "INJUSDT", "primary_venue": "okx"}
+    {
+      "symbol": "AAVEUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "ADAUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "APTUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ARBUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "BCHUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "BEATUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "BTCUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "BULLAUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "CHIPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "CHZUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "DASHUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "DOTUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ENSOUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ETCUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "ETHUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "FETUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "FILUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "FLOKIUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "FOLKUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "HBARUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "HOODUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "HUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ICPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "INJUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "JASMYUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "JUPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "LIGHTUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "LINKUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "LTCUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "MATICUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "MYXUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "NEARUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "OPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ORDUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PENGUUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PIPPINUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PIXELUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "POLUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PRLUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "RIVERUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "SEIUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "SIRENUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "SKYAIUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "SOLUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "SPXUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "STOUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "STRKUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "SUIUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "TACUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "TAGUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "TIAUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "TONUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "TRADOORUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "TRXUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "TSTUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "UNIUSDT",
+      "primary_venue": "okx"
+    },
+    {
+      "symbol": "VIRTUALUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "WIFUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "XAIUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "XLMUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "XMRUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "XPLUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "XRPUSDT",
+      "primary_venue": "binance"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ZENUSDT",
+      "primary_venue": "bybit"
+    },
+    {
+      "symbol": "ZROUSDT",
+      "primary_venue": "bybit"
+    }
   ]
 }

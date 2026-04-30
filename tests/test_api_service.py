@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -678,6 +679,54 @@ async def test_settings_strategy_routes_store_runtime_configuration(repository, 
     assert defaults_response.headers["location"] == "/settings?strategy_saved=defaults"
     assert restored["timeframe"] == settings.default_strategy_config()["timeframe"]
     assert restored["volume_z_threshold"] == settings.default_strategy_config()["volume_z_threshold"]
+
+
+@pytest.mark.asyncio
+async def test_settings_strategy_export_and_import(repository, cache, tmp_path: Path) -> None:
+    universe_path = tmp_path / "universe.json"
+    save_universe(universe_path, [UniverseSymbol(symbol="BTCUSDT", primary_venue=Venue.BINANCE)])
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+        universe_path=universe_path,
+    )
+    await cache.set_strategy_config(
+        {
+            "timeframe": "5m",
+            "minimum_expected_rr": 2.75,
+            "tick_qty_per_5s": 88,
+        }
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        export_response = await client.get("/settings/export-strategy")
+
+    assert export_response.status_code == 303
+    exported_filename = export_response.headers["location"].split("strategy_exported=", 1)[1]
+    exported_filename = httpx.URL("http://testserver/" + exported_filename).path.lstrip("/")
+    preset_dir = universe_path.parent / "strategy_presets"
+    preset_files = list(preset_dir.glob("Strategy_config_*.json"))
+    assert preset_files
+    payload = json.loads(preset_files[0].read_text(encoding="utf-8"))
+    assert payload["minimum_expected_rr"] == 2.75
+    assert payload["tick_qty_per_5s"] == 88
+
+    filename = preset_files[0].name
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        import_response = await client.get(f"/settings/import-strategy?filename={filename}")
+        page = await client.get(f"/settings?import_file={filename}&strategy_loaded=1")
+
+    assert import_response.status_code == 303
+    assert f'import_file={filename}' in import_response.headers["location"]
+    assert page.status_code == 200
+    assert 'value="2.75"' in page.text
+    assert 'value="88"' in page.text
 
 
 @pytest.mark.asyncio
