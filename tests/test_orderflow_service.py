@@ -75,10 +75,10 @@ async def test_orderflow_service_sends_executed_alert(repository, cache) -> None
     assert alert is not None
     assert alert.signal_id.endswith("#executed")
     assert "SOLUSDT" in alert.text
-    assert "Entry: 150.0000" in alert.text
-    assert "TP1: 156.0000" in alert.text
-    assert "TP2: 162.0000" in alert.text
-    assert "SL: 147.0000" in alert.text
+    assert "Entry: 150.000" in alert.text
+    assert "TP1: 156.000" in alert.text
+    assert "TP2: 162.000" in alert.text
+    assert "SL: 147.000" in alert.text
     assert alert.text.endswith("EXECUTED")
 
 

@@ -16,7 +16,7 @@ from openpyxl.utils import get_column_letter
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from brakerscalp.config import Settings
-from brakerscalp.domain.models import UniverseSymbol, Venue
+from brakerscalp.domain.models import UniverseSymbol, Venue, format_price, format_price_range
 from brakerscalp.services.market_inspector import ManualScanResult, MarketInspector
 from brakerscalp.signals.engine import StrategyRuntimeConfig
 from brakerscalp.storage.cache import StateCache
@@ -1550,19 +1550,21 @@ def _service_detail_card(item: dict[str, Any], local_tz: ZoneInfo) -> str:
 def _format_qty(value: float | None) -> str:
     if value is None:
         return "n/a"
-    return f"{value:.6f}".rstrip("0").rstrip(".")
+    return f"{value:,.6f}".rstrip("0").rstrip(".")
 
 
-def _position_metrics(signal, risk_usdt: float) -> tuple[float | None, float | None, float | None]:
+def _position_metrics(signal, risk_usdt: float) -> tuple[float | None, float | None, float | None, float | None, float | None]:
     stop_distance = abs(float(signal.entry_price) - float(signal.invalidation_price))
     if stop_distance <= 0 or risk_usdt <= 0:
-        return None, None, None
+        return None, None, None, None, None
     qty = float(risk_usdt) / stop_distance
     tp1 = float(signal.targets[0]) if signal.targets else float(signal.entry_price)
     tp2 = float(signal.targets[1]) if len(signal.targets) > 1 else tp1
     tp1_profit = qty * abs(tp1 - float(signal.entry_price))
     tp2_profit = qty * abs(tp2 - float(signal.entry_price))
-    return qty, tp1_profit, tp2_profit
+    notional_usdt = qty * float(signal.entry_price)
+    sl_pct = (stop_distance / max(abs(float(signal.entry_price)), 1e-9)) * 100.0
+    return qty, tp1_profit, tp2_profit, notional_usdt, sl_pct
 
 
 def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt: float = 0.0) -> str:
@@ -1574,16 +1576,20 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
     level_zone = "n/a"
     if signal.render_context:
         level_zone = signal.render_context.get("price_zone", "n/a")
-    qty, tp1_profit, tp2_profit = _position_metrics(signal, risk_usdt)
+    qty, tp1_profit, tp2_profit, notional_usdt, sl_pct = _position_metrics(signal, risk_usdt)
     tp1_value = float(signal.targets[0]) if signal.targets else float(signal.entry_price)
     tp2_value = float(signal.targets[1]) if len(signal.targets) > 1 else tp1_value
+    price_refs = [float(signal.entry_price), float(signal.invalidation_price), tp1_value, tp2_value]
     targets_display = (
-        f"{tp1_value:.4f} ({tp1_profit:.2f} USDT) / {tp2_value:.4f} ({tp2_profit:.2f} USDT)"
+        f"{format_price(tp1_value, *price_refs)} ({tp1_profit:.2f} USDT) / {format_price(tp2_value, *price_refs)} ({tp2_profit:.2f} USDT)"
         if tp1_profit is not None and tp2_profit is not None
-        else f"{tp1_value:.4f} / {tp2_value:.4f}"
+        else f"{format_price(tp1_value, *price_refs)} / {format_price(tp2_value, *price_refs)}"
     )
     meta = f"Signal class: {escape(signal.signal_class.upper())}" if include_meta else escape(signal.signal_class.upper())
     win_loss = f'<span class="wl-badge"><span class="win">{item.symbol_wins}</span> | <span class="loss">{item.symbol_losses}</span></span>'
+    qty_display = _format_qty(qty)
+    if notional_usdt is not None:
+        qty_display = f"{qty_display} ({notional_usdt:.2f} USDT)"
     return f"""
     <article class="setup-card">
       <div class="top">
@@ -1599,11 +1605,12 @@ def _setup_card(item, local_tz: ZoneInfo, include_meta: bool = False, risk_usdt:
         <div class="kv-grid">
           <div class="kv"><span>Confidence</span>{signal.confidence:.1f}</div>
           <div class="kv"><span>Timeframe</span>{escape(signal.timeframe)}</div>
-          <div class="kv"><span>Entry</span>{signal.entry_price:.4f}</div>
-          <div class="kv"><span>SL</span>{signal.invalidation_price:.4f}</div>
+          <div class="kv"><span>Entry</span>{format_price(float(signal.entry_price), *price_refs)}</div>
+          <div class="kv"><span>SL</span>{format_price(float(signal.invalidation_price), *price_refs)}</div>
           <div class="kv"><span>T1 / T2</span>{targets_display}</div>
-          <div class="kv"><span>Qty</span>{_format_qty(qty)}</div>
+          <div class="kv"><span>Qty</span>{qty_display}</div>
           <div class="kv"><span>Уровень</span>{escape(level_zone)}</div>
+          <div class="kv"><span>SL %</span>{f"{sl_pct:.2f}%" if sl_pct is not None else "n/a"}</div>
         </div>
         <h3>Обоснование</h3>
         <ul class="bullets">{reason_lines}</ul>

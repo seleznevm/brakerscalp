@@ -415,9 +415,60 @@ async def test_setups_page_gracefully_handles_missing_status_filter(repository, 
     assert response.status_code == 200
     assert "SOLUSDT" in response.text
     assert "Qty" in response.text
-    assert "156.0000 (50.00 USDT) / 162.0000 (100.00 USDT)" in response.text
+    assert "156.000 (50.00 USDT) / 162.000 (100.00 USDT)" in response.text
+    assert "8.333333 (1250.00 USDT)" in response.text
+    assert "2.00%" in response.text
     assert 'value="tp1"' in response.text
     assert 'value="loss"' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_setups_page_uses_higher_precision_for_low_priced_assets(repository, cache) -> None:
+    detected_at = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    decision = SignalDecision(
+        symbol="PENGUUSDT",
+        venue=Venue.BINANCE,
+        timeframe=Timeframe.M5,
+        setup=SetupType.BREAKOUT,
+        direction=Direction.LONG,
+        signal_class=SignalClass.WATCHLIST,
+        confidence=90.0,
+        level_id="pengu-breakout-level",
+        alert_key="pengu-breakout-test",
+        detected_at=detected_at,
+        entry_price=0.010003,
+        invalidation_price=0.009947,
+        targets=[0.010127, 0.010171],
+        expected_rr=2.21,
+        rationale=["Compression near resistance"],
+        why_not_higher=["Tape still slow"],
+        contributions=[ScoreContribution(group="level", score=20.0, max_score=25.0, reason="Strong level")],
+        data_health=DataHealth(venue=Venue.BINANCE, symbol="PENGUUSDT", is_fresh=True, freshness_ms=0),
+        feature_snapshot={"atr_15m": 0.00002},
+        render_context={"trigger": "Need a close above 0.010003", "price_zone": "0.009947 - 0.010003"},
+    )
+    await repository.save_signal(decision)
+
+    settings = Settings(
+        _env_file=None,
+        environment="test",
+        bot_token="test-token",
+        allowed_chat_ids=[1],
+        alert_chat_ids=[1],
+        database_url="sqlite+aiosqlite:///ignored.db",
+        redis_url="redis://localhost:6379/0",
+        risk_usdt=5.0,
+    )
+    app = build_api(repository, cache, settings, universe=[], adapters={})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        response = await client.get("/setups")
+
+    assert response.status_code == 200
+    assert "0.010003" in response.text
+    assert "0.009947" in response.text
+    assert "0.010127" in response.text
+    assert "0.010171" in response.text
 
 
 @pytest.mark.asyncio

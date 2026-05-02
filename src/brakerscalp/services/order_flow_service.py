@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from brakerscalp.domain.models import AlertMessage, BookSnapshot, MarketCandle, OrderFlowSnapshot, SignalClass, TradeTick, UniverseSymbol, Venue
+from brakerscalp.domain.models import AlertMessage, BookSnapshot, MarketCandle, OrderFlowSnapshot, SignalClass, TradeTick, UniverseSymbol, Venue, format_price
 from brakerscalp.logging import get_logger
 from brakerscalp.services.daily_summary import SETUP_STATUS_EXECUTED, SetupLifecycle, evaluate_setup_lifecycle
 from brakerscalp.signals.engine import StrategyRuntimeConfig
@@ -147,14 +147,15 @@ class OrderFlowAnalyzerService:
             return False
         tp1 = float(signal.targets[0]) if signal.targets else 0.0
         tp2 = float(signal.targets[1]) if len(signal.targets) > 1 else tp1
+        price_refs = (float(signal.entry_price), float(signal.invalidation_price), tp1, tp2)
         text = (
             f"✅ {signal.symbol} | {signal.setup.upper()} | {signal.direction.upper()} | {signal.timeframe}\n"
             f"#{signal.setup.upper()} #{self._coin_hashtag(signal.symbol)}\n"
             f"Entry triggered at {_format_dt(lifecycle.entry_at)}\n"
-            f"Entry: {float(signal.entry_price):.4f}\n"
-            f"TP1: {tp1:.4f}\n"
-            f"TP2: {tp2:.4f}\n"
-            f"SL: {float(signal.invalidation_price):.4f}\n"
+            f"Entry: {format_price(float(signal.entry_price), *price_refs)}\n"
+            f"TP1: {format_price(tp1, *price_refs)}\n"
+            f"TP2: {format_price(tp2, *price_refs)}\n"
+            f"SL: {format_price(float(signal.invalidation_price), *price_refs)}\n"
             f"EXECUTED"
         )
         await self._queue_alert(
@@ -189,8 +190,8 @@ class OrderFlowAnalyzerService:
             f"🛡️ {signal.symbol} | {signal.setup.upper()} | {signal.direction.upper()} | {signal.timeframe}\n"
             f"#{signal.setup.upper()} #{self._coin_hashtag(signal.symbol)}\n"
             f"Dynamic breakeven trigger hit.\n"
-            f"Move SL to entry: {float(signal.entry_price):.4f}\n"
-            f"Current price: {current_price:.4f}\n"
+            f"Move SL to entry: {format_price(float(signal.entry_price), float(signal.entry_price), float(signal.invalidation_price), *signal.targets)}\n"
+            f"Current price: {format_price(current_price, float(signal.entry_price), float(signal.invalidation_price), *signal.targets)}\n"
             f"Open PnL: {gain_pct:.2f}%\n"
             f"ACTIVATED"
         )
@@ -233,7 +234,7 @@ class OrderFlowAnalyzerService:
             f"#{signal.setup.upper()} #{self._coin_hashtag(signal.symbol)}\n"
             f"Time-stop triggered: close by market.\n"
             f"No {strategy.time_stop_min_move_pct:.2f}% impulse within {strategy.time_stop_minutes} minutes.\n"
-            f"Current price: {current_price:.4f}\n"
+            f"Current price: {format_price(current_price, float(signal.entry_price), float(signal.invalidation_price), *signal.targets)}\n"
             f"Best move seen: {max_move_pct:.2f}%\n"
             f"ACTIVATED"
         )

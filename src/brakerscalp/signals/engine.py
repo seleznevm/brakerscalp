@@ -21,6 +21,7 @@ from brakerscalp.domain.models import (
     TradeTick,
     Timeframe,
     Venue,
+    format_price,
 )
 from brakerscalp.signals.indicators import average_true_range, median_spread, simple_moving_average, volume_zscore
 
@@ -896,8 +897,8 @@ class RuleEngine:
             "level_upper": level.upper_price,
             "entry_price": entry_price,
             "stop_price": invalidation,
-            "tp1": round(t1, 6),
-            "tp2": round(t2, 6),
+            "tp1": t1,
+            "tp2": t2,
             "minimum_expected_rr": self.minimum_expected_rr,
             "chart_timeframe": self.strategy.timeframe.value,
             "setup_stage": stage,
@@ -923,7 +924,7 @@ class RuleEngine:
             alert_key=alert_key,
             entry_price=entry_price,
             invalidation_price=invalidation,
-            targets=[round(t1, 6), round(t2, 6)],
+            targets=[t1, t2],
             expected_rr=expected_rr,
             rationale=rationale,
             why_not_higher=why_not_higher,
@@ -1177,12 +1178,12 @@ class RuleEngine:
                 "Приготовьтесь к возможному пробою."
             )
         if direction == Direction.LONG and confirmed_breakout:
-            return f"5m закрытие выше зоны сопротивления на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
+            return f"5m закрытие выше зоны сопротивления на {breakout_distance_atr:.2f} ATR ({format_price(candle.close, candle.close, level.lower_price, level.upper_price)})."
         if direction == Direction.SHORT and confirmed_breakout:
-            return f"5m закрытие ниже зоны поддержки на {breakout_distance_atr:.2f} ATR ({candle.close:.4f})."
+            return f"5m закрытие ниже зоны поддержки на {breakout_distance_atr:.2f} ATR ({format_price(candle.close, candle.close, level.lower_price, level.upper_price)})."
         if direction == Direction.LONG:
-            return f"Цена стоит под сопротивлением. Для входа нужен 5m close выше {entry_price:.4f}."
-        return f"Цена стоит над поддержкой. Для входа нужен 5m close ниже {entry_price:.4f}."
+            return f"Цена стоит под сопротивлением. Для входа нужен 5m close выше {format_price(entry_price, entry_price, level.lower_price, level.upper_price)}."
+        return f"Цена стоит над поддержкой. Для входа нужен 5m close ниже {format_price(entry_price, entry_price, level.lower_price, level.upper_price)}."
 
     def _approach_distance_atr(self, breakout: BreakoutState) -> float:
         return max(-breakout.breakout_distance_atr, 0.0)
@@ -1200,8 +1201,16 @@ class RuleEngine:
         level: LevelCandidate,
     ) -> str:
         if direction == Direction.LONG:
-            return f"SL под наторговкой и ниже зоны ({invalidation:.4f}); локальный anchor {anchor_price:.4f}, нижняя граница уровня {level.lower_price:.4f}."
-        return f"SL над наторговкой и выше зоны ({invalidation:.4f}); локальный anchor {anchor_price:.4f}, верхняя граница уровня {level.upper_price:.4f}."
+            return (
+                f"SL под наторговкой и ниже зоны ({format_price(invalidation, invalidation, level.lower_price, level.upper_price)}); "
+                f"локальный anchor {format_price(anchor_price, anchor_price, level.lower_price, level.upper_price)}, "
+                f"нижняя граница уровня {format_price(level.lower_price, level.lower_price, level.upper_price)}."
+            )
+        return (
+            f"SL над наторговкой и выше зоны ({format_price(invalidation, invalidation, level.lower_price, level.upper_price)}); "
+            f"локальный anchor {format_price(anchor_price, anchor_price, level.lower_price, level.upper_price)}, "
+            f"верхняя граница уровня {format_price(level.upper_price, level.lower_price, level.upper_price)}."
+        )
 
     def _status_without_decision(
         self,

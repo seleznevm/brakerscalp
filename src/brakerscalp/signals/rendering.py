@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from brakerscalp.domain.models import AlertMessage, SignalDecision
+from brakerscalp.domain.models import AlertMessage, SignalDecision, format_price
 
 
 def _bullet_lines(items: list[str]) -> str:
@@ -25,7 +25,10 @@ def render_signal(decision: SignalDecision) -> str:
     rationale_lines = _bullet_lines(decision.rationale)
     why_lines = _bullet_lines(decision.why_not_higher)
     targets = decision.targets[:2]
-    target_lines = "\n".join(f"- T{index + 1}: {price:.4f}" for index, price in enumerate(targets))
+    target_lines = "\n".join(
+        f"- T{index + 1}: {format_price(price, decision.entry_price, decision.invalidation_price, *targets)}"
+        for index, price in enumerate(targets)
+    )
     signal_class = decision.signal_class.value.upper()
     text = (
         f"🚨 {decision.symbol} | {decision.setup.value.upper()} | {decision.direction.value.upper()} | {decision.timeframe.value} | {signal_class}\n"
@@ -36,10 +39,10 @@ def render_signal(decision: SignalDecision) -> str:
         f"Триггер:\n"
         f"{context['trigger']}\n\n"
         f"План сделки:\n"
-        f"- Entry: {decision.entry_price:.4f}\n"
-        f"- SL: {decision.invalidation_price:.4f}\n"
-        f"- T1: {targets[0]:.4f}\n"
-        f"- T2: {targets[1]:.4f}\n\n"
+        f"- Entry: {format_price(decision.entry_price, decision.entry_price, decision.invalidation_price, *targets)}\n"
+        f"- SL: {format_price(decision.invalidation_price, decision.entry_price, decision.invalidation_price, *targets)}\n"
+        f"- T1: {format_price(targets[0], decision.entry_price, decision.invalidation_price, *targets)}\n"
+        f"- T2: {format_price(targets[1], decision.entry_price, decision.invalidation_price, *targets)}\n\n"
         f"Обоснование:\n"
         f"{rationale_lines}\n\n"
         f"Инвалидация:\n"
@@ -67,7 +70,9 @@ def render_chart_caption(decision: SignalDecision) -> str:
     text = (
         f"{decision.symbol} | {setup.upper()} | {direction.upper()} | {signal_class}\n"
         f"{_hashtags(decision)}\n"
-        f"Entry {decision.entry_price:.4f} | SL {decision.invalidation_price:.4f} | T1 {decision.targets[0]:.4f}"
+        f"Entry {format_price(decision.entry_price, decision.entry_price, decision.invalidation_price, *decision.targets)}"
+        f" | SL {format_price(decision.invalidation_price, decision.entry_price, decision.invalidation_price, *decision.targets)}"
+        f" | T1 {format_price(decision.targets[0], decision.entry_price, decision.invalidation_price, *decision.targets)}"
     )
     if str(decision.render_context.get("setup_stage", "")) == "activated":
         text += "\nACTIVATED"

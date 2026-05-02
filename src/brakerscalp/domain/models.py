@@ -12,6 +12,36 @@ def utcnow() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def suggest_price_decimals(*values: float | int | None) -> int:
+    numeric = [abs(float(value)) for value in values if value not in (None, 0)]
+    if not numeric:
+        return 4
+    reference = min(numeric)
+    if reference >= 1000:
+        return 2
+    if reference >= 100:
+        return 3
+    if reference >= 1:
+        return 4
+    if reference >= 0.1:
+        return 5
+    if reference >= 0.01:
+        return 6
+    if reference >= 0.001:
+        return 7
+    return 8
+
+
+def format_price(value: float, *references: float | int | None) -> str:
+    decimals = suggest_price_decimals(value, *references)
+    return f"{float(value):.{decimals}f}"
+
+
+def format_price_range(lower: float, upper: float) -> str:
+    decimals = suggest_price_decimals(lower, upper)
+    return f"{float(lower):.{decimals}f} - {float(upper):.{decimals}f}"
+
+
 class Venue(StrEnum):
     BINANCE = "binance"
     BYBIT = "bybit"
@@ -166,7 +196,7 @@ class LevelCandidate(BaseModel):
 
     @property
     def zone_text(self) -> str:
-        return f"{self.lower_price:.4f} - {self.upper_price:.4f}"
+        return format_price_range(self.lower_price, self.upper_price)
 
 
 class ScoreContribution(BaseModel):
