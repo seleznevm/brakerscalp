@@ -88,7 +88,7 @@ def evaluate_setup_lifecycle(
 
     for candle in ordered_candles:
         candle_close_time = _as_utc(candle.close_time)
-        entry_hit = candle.high >= entry_price if is_long else candle.low <= entry_price
+        entry_hit = candle.low <= entry_price <= candle.high
         tp1_hit = candle.high >= tp1_price if is_long else candle.low <= tp1_price
         tp2_hit = candle.high >= tp2_price if is_long else candle.low <= tp2_price
         stop_hit = candle.low <= stop_price if is_long else candle.high >= stop_price

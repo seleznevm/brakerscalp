@@ -212,12 +212,14 @@ class OrderFlowAnalyzerService:
     ) -> bool:
         if not strategy.enable_time_stop_alerts:
             return False
-        if now < signal.detected_at + timedelta(minutes=strategy.time_stop_minutes):
-            return False
         lifecycle = lifecycle or await self._signal_lifecycle(signal, now)
         if lifecycle.status != SETUP_STATUS_EXECUTED:
             return False
-        max_move_pct = await self._max_favorable_move_pct(signal)
+        if lifecycle.entry_at is None:
+            return False
+        if now < lifecycle.entry_at + timedelta(minutes=strategy.time_stop_minutes):
+            return False
+        max_move_pct = await self._max_favorable_move_pct(signal, lifecycle.entry_at)
         if strategy.enable_dynamic_breakeven_alerts and max_move_pct >= strategy.breakeven_trigger_pct:
             return False
         if max_move_pct >= strategy.time_stop_min_move_pct:
@@ -276,10 +278,11 @@ class OrderFlowAnalyzerService:
             return candles[-1].close
         return 0.0
 
-    async def _max_favorable_move_pct(self, signal: SignalRecord) -> float:
+    async def _max_favorable_move_pct(self, signal: SignalRecord, start_at: datetime | None = None) -> float:
         item = UniverseSymbol(symbol=signal.symbol, primary_venue=self._venue_from_value(signal.venue))
         trades = self._parse_model_list(await self.cache.get_trade_history(item.primary_venue.value, signal.symbol), TradeTick)
-        relevant = [trade.price for trade in trades if trade.timestamp >= signal.detected_at]
+        threshold = start_at or signal.detected_at
+        relevant = [trade.price for trade in trades if trade.timestamp >= threshold]
         if not relevant:
             current_price = await self._signal_current_price(signal)
             relevant = [current_price] if current_price else []

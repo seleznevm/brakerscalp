@@ -80,6 +80,14 @@ def test_evaluate_setup_lifecycle_executed_after_entry() -> None:
     assert lifecycle.entry_at is not None
 
 
+def test_evaluate_setup_lifecycle_does_not_execute_when_price_is_already_above_entry() -> None:
+    signal = make_signal(direction="long")
+    candles = [make_candle(high=105.0, low=101.0)]
+    lifecycle = evaluate_setup_lifecycle(signal, candles, analysis_end=signal.detected_at + timedelta(hours=2))
+    assert lifecycle.status == "watch"
+    assert lifecycle.entry_at is None
+
+
 def test_evaluate_setup_lifecycle_invalidated_when_expired() -> None:
     signal = make_signal(direction="long")
     candles = [make_candle(high=99.0, low=97.0)]

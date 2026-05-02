@@ -281,3 +281,75 @@ async def test_orderflow_service_does_not_replay_old_executed_signal_on_boot(rep
 
     assert sent == 0
     assert alert is None
+
+
+@pytest.mark.asyncio
+async def test_time_stop_uses_actual_entry_time_not_signal_detection(repository, cache) -> None:
+    now = datetime.now(tz=timezone.utc)
+    detected_at = now - timedelta(minutes=12)
+    decision = SignalDecision(
+        symbol="ORCAUSDT",
+        venue=Venue.BINANCE,
+        timeframe=Timeframe.M15,
+        setup=SetupType.BREAKOUT,
+        direction=Direction.LONG,
+        signal_class=SignalClass.WATCHLIST,
+        confidence=86.0,
+        level_id="orca-watch-level",
+        alert_key="orca-watch-alert",
+        detected_at=detected_at,
+        entry_price=2.0625,
+        invalidation_price=1.95,
+        targets=[2.2876, 2.4001],
+        expected_rr=2.0,
+        rationale=["Watching breakout"],
+        why_not_higher=["Waiting for execution"],
+        contributions=[ScoreContribution(group="level", score=20.0, max_score=25.0, reason="Strong level")],
+        data_health=DataHealth(venue=Venue.BINANCE, symbol="ORCAUSDT", is_fresh=True, freshness_ms=0),
+        feature_snapshot={"atr_15m": 0.05},
+        render_context={"trigger": "Need a close above 2.0625", "price_zone": "2.04 - 2.06", "setup_stage": "watch"},
+    )
+    await repository.save_signal(decision)
+    entry_open = now - timedelta(minutes=2)
+    await repository.upsert_candles(
+        [
+            MarketCandle(
+                symbol="ORCAUSDT",
+                venue=Venue.BINANCE,
+                timeframe=Timeframe.M15,
+                open_time=entry_open - timedelta(minutes=15),
+                close_time=entry_open,
+                open=2.01,
+                high=2.08,
+                low=2.01,
+                close=2.07,
+                volume=1500.0,
+                quote_volume=3105.0,
+                trade_count=18,
+                taker_buy_volume=900.0,
+                vwap=2.05,
+            )
+        ]
+    )
+
+    service = OrderFlowAnalyzerService(
+        repository=repository,
+        cache=cache,
+        universe=[],
+        alert_chat_ids=[1],
+        interval_seconds=5,
+    )
+    signal = await repository.get_signal_by_decision_id(decision.decision_id)
+    assert signal is not None
+    sent = await service._maybe_send_time_stop(
+        signal,
+        StrategyRuntimeConfig(
+            enable_time_stop_alerts=True,
+            enable_dynamic_breakeven_alerts=False,
+            time_stop_minutes=3,
+            time_stop_min_move_pct=1.0,
+        ),
+        now,
+    )
+
+    assert sent is False

@@ -788,6 +788,8 @@ class RuleEngine:
             entry_price = level.upper_price + atr_15m * 0.03
         else:
             entry_price = level.lower_price - atr_15m * 0.03
+        if signal_class == SignalClass.PRE_ALERT and self._is_late_entry(direction, current.close, entry_price):
+            return None
         if direction == Direction.LONG:
             invalidation = min(structure.anchor_price - atr_15m * 0.10, level.lower_price - atr_15m * 0.15)
         else:
@@ -840,6 +842,7 @@ class RuleEngine:
         if not why_not_higher:
             why_not_higher.append("Сетап сильный, но confidence дополнительно ограничен до накопления live-статистики.")
 
+        approach_distance_atr = self._approach_distance_atr(breakout)
         rationale = [
             f"Монета в игре: volume z-score {coin.volume_z_15m:.2f}, quote-volume x{coin.quote_activity_ratio:.2f} к фону.",
             f"Тренд 1h/4h: {trend.bias.value.upper() if trend.bias else 'MIXED'} | fast/slow 1h {trend.fast_1h:.4f}/{trend.slow_1h:.4f}.",
@@ -849,7 +852,7 @@ class RuleEngine:
             (
                 f"Подтверждение импульса: {breakout.breakout_distance_atr:.2f} ATR за уровнем, volume z {breakout.volume_z:.2f}, 5m follow-through {'да' if breakout.follow_through_5m else 'нет'}."
                 if confirmed_breakout
-                else f"Цена прижата к уровню: dist {breakout.breakout_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
+                else f"Цена прижата к уровню: dist {approach_distance_atr:.2f} ATR, volume z {breakout.volume_z:.2f}, ждем 5m close за зоной."
             ),
             f"Delta / CVD: delta ratio {breakout.delta_ratio:.2f}, CVD slope {breakout.cvd_slope:.2f}, divergence {'yes' if breakout.delta_divergence else 'no'}.",
             f"Сделок в ленте за 5s: {breakout.tick_qty_per_5s}.",
@@ -879,7 +882,7 @@ class RuleEngine:
                 confirmed_breakout,
                 entry_price,
                 signal_class,
-                structure.near_level_atr,
+                approach_distance_atr,
                 structure.squeeze_score,
             ),
             "stop_logic": self._stop_logic(direction, invalidation, structure.anchor_price, level),
@@ -1181,6 +1184,14 @@ class RuleEngine:
             return f"Цена стоит под сопротивлением. Для входа нужен 5m close выше {entry_price:.4f}."
         return f"Цена стоит над поддержкой. Для входа нужен 5m close ниже {entry_price:.4f}."
 
+    def _approach_distance_atr(self, breakout: BreakoutState) -> float:
+        return max(-breakout.breakout_distance_atr, 0.0)
+
+    def _is_late_entry(self, direction: Direction, current_price: float, entry_price: float) -> bool:
+        if direction == Direction.LONG:
+            return current_price > entry_price
+        return current_price < entry_price
+
     def _stop_logic(
         self,
         direction: Direction,
@@ -1215,9 +1226,11 @@ class RuleEngine:
         breakout: BreakoutState,
         confidence: float,
     ) -> bool:
+        approach_distance_atr = self._approach_distance_atr(breakout)
         return (
             confidence >= self.strategy.pre_alert_confidence_threshold
-            and self.strategy.pre_alert_distance_atr_min <= structure.near_level_atr <= self.strategy.pre_alert_distance_atr_max
+            and breakout.breakout_distance_atr < 0
+            and self.strategy.pre_alert_distance_atr_min <= approach_distance_atr <= self.strategy.pre_alert_distance_atr_max
             and structure.squeeze_score >= self.strategy.pre_alert_squeeze_threshold
             and structure.cascade_touches >= self.strategy.min_touches
             and breakout.volume_z >= self.strategy.pre_alert_volume_z_threshold
