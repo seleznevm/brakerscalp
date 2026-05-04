@@ -476,8 +476,10 @@ class RuleEngine:
         return None
 
     def _trend_state(self, candles_1h: list[MarketCandle], candles_4h: list[MarketCandle]) -> TrendState:
-        closes_1h = [item.close for item in candles_1h]
-        closes_4h = [item.close for item in candles_4h]
+        closed_1h = candles_1h[:-1] if len(candles_1h) > 1 else candles_1h
+        closed_4h = candles_4h[:-1] if len(candles_4h) > 1 else candles_4h
+        closes_1h = [item.close for item in closed_1h]
+        closes_4h = [item.close for item in closed_4h]
         fast_1h = simple_moving_average(closes_1h, 12)
         slow_1h = simple_moving_average(closes_1h, 48)
         fast_4h = simple_moving_average(closes_4h, 6)
@@ -600,11 +602,13 @@ class RuleEngine:
         cross_venue_health: list[DataHealth],
         benchmark_candles_5m: dict[str, list[MarketCandle]],
     ) -> BreakoutState:
-        candle_range = max(current.high - current.low, 1e-9)
-        body_ratio = abs(current.close - current.open) / candle_range
-        recent_ranges = [item.high - item.low for item in execution_candles[-25:-1]]
+        quality_candle = execution_candles[-2] if len(execution_candles) > 1 else current
+        closed_execution_candles = execution_candles[:-1] if len(execution_candles) > 1 else execution_candles
+        candle_range = max(quality_candle.high - quality_candle.low, 1e-9)
+        body_ratio = abs(quality_candle.close - quality_candle.open) / candle_range
+        recent_ranges = [item.high - item.low for item in closed_execution_candles[-25:-1]]
         range_expansion = candle_range / max(median_spread(recent_ranges), 1e-9)
-        volume_z = volume_zscore(execution_candles[-40:], period=30)
+        volume_z = volume_zscore(closed_execution_candles[-40:], period=30)
         book_imbalance = self._book_imbalance(book)
         spread_ratio = health.spread_ratio
         fresh_cross = [item for item in cross_venue_health if item.venue != health.venue and item.is_fresh]
@@ -642,11 +646,11 @@ class RuleEngine:
 
         if direction == Direction.LONG:
             breakout_distance_atr = (current.close - level.upper_price) / max(atr_execution, 1e-9)
-            close_to_extreme = (current.high - current.close) / candle_range
+            close_to_extreme = (quality_candle.high - quality_candle.close) / candle_range
             book_support = book_imbalance >= -0.22
         else:
             breakout_distance_atr = (level.lower_price - current.close) / max(atr_execution, 1e-9)
-            close_to_extreme = (current.close - current.low) / candle_range
+            close_to_extreme = (quality_candle.close - quality_candle.low) / candle_range
             book_support = book_imbalance <= 0.22
 
         velocity_support = (
@@ -660,7 +664,8 @@ class RuleEngine:
             execution_candles=execution_candles,
             benchmark_candles_5m=benchmark_candles_5m,
         )
-        follow_through_5m = self._follow_through_5m(candles_5m[-3:], level, direction)
+        closed_5m_candles = candles_5m[:-1] if len(candles_5m) > 1 else candles_5m
+        follow_through_5m = self._follow_through_5m(closed_5m_candles[-3:], level, direction)
         signal_ready = (
             data_ok
             and breakout_distance_atr >= self.strategy.breakout_distance_atr
@@ -837,7 +842,7 @@ class RuleEngine:
                 f"Лента пока недостаточно быстрая: {breakout.tick_qty_per_5s} сделок за 5s при пороге {self.strategy.tick_qty_per_5s}."
             )
         if breakout.correlation_headwind:
-            why_not_higher.append("BTC/ETH benchmark flow is too supportive for this alt short.")
+            why_not_higher.append(self._correlation_headwind_text(direction))
         if expected_rr < 2.4:
             why_not_higher.append(f"Expected R:R remains close to the minimum threshold: {expected_rr:.2f}.")
         if not why_not_higher:
@@ -863,7 +868,7 @@ class RuleEngine:
         if breakout.liquidation_cluster_score > 0:
             rationale.append(f"Liquidation cluster confluence: score {breakout.liquidation_cluster_score:.2f}.")
         if breakout.correlation_headwind:
-            rationale.append("BTC/ETH benchmark flow is pressing higher and raises false-breakdown risk for this short.")
+            rationale.append(self._correlation_headwind_text(direction))
         if payload.derivative_context is not None:
             rationale.append(
                 f"Контекст derivatives: funding {payload.derivative_context.funding_rate:.5f}, basis {payload.derivative_context.basis_bps:.1f} bps, OI {payload.derivative_context.open_interest:.2f}."
@@ -1049,14 +1054,14 @@ class RuleEngine:
         execution_candles: list[MarketCandle],
         benchmark_candles_5m: dict[str, list[MarketCandle]],
     ) -> tuple[float, bool]:
-        if direction != Direction.SHORT or not self.strategy.enable_btc_eth_correlation_filter:
+        if not self.strategy.enable_btc_eth_correlation_filter:
             return 0.0, False
         if len(execution_candles) < 8:
             return 0.0, False
         alt_window = execution_candles[-6:]
         alt_return_pct = ((alt_window[-1].close - alt_window[0].open) / max(alt_window[0].open, 1e-9)) * 100.0
         strongest_benchmark_score = 0.0
-        strongest_benchmark_return = 0.0
+        reference_return_pct: float | None = None
         for symbol in ("BTCUSDT", "ETHUSDT"):
             candles = benchmark_candles_5m.get(symbol, [])
             if len(candles) < 8:
@@ -1064,21 +1069,36 @@ class RuleEngine:
             window = candles[-6:]
             benchmark_return_pct = ((window[-1].close - window[0].open) / max(window[0].open, 1e-9)) * 100.0
             benchmark_atr = average_true_range(candles[-20:] or candles, period=14)
+            directional_move = 0.0
+            if direction == Direction.SHORT:
+                directional_move = max(window[-1].close - window[0].open, 0.0)
+                squeeze_bias = self._squeeze_score(window, Direction.LONG)
+            else:
+                directional_move = max(window[0].open - window[-1].close, 0.0)
+                squeeze_bias = self._squeeze_score(window, Direction.SHORT)
             normalized_move = 0.0
             if benchmark_atr > 0:
-                normalized_move = max(window[-1].close - window[0].open, 0.0) / benchmark_atr
-            squeeze_long = self._squeeze_score(window, Direction.LONG)
+                normalized_move = directional_move / benchmark_atr
             benchmark_score = 0.0
-            if benchmark_return_pct > 0:
-                benchmark_score = min(normalized_move / 1.8, 1.0) * 0.70 + min(squeeze_long, 1.0) * 0.30
+            if (direction == Direction.SHORT and benchmark_return_pct > 0) or (direction == Direction.LONG and benchmark_return_pct < 0):
+                benchmark_score = min(normalized_move / 1.8, 1.0) * 0.70 + min(squeeze_bias, 1.0) * 0.30
             else:
-                benchmark_score = min(squeeze_long, 1.0) * 0.20
+                benchmark_score = min(squeeze_bias, 1.0) * 0.20
             strongest_benchmark_score = max(strongest_benchmark_score, benchmark_score)
-            strongest_benchmark_return = max(strongest_benchmark_return, benchmark_return_pct)
+            if reference_return_pct is None:
+                reference_return_pct = benchmark_return_pct
+            elif direction == Direction.SHORT:
+                reference_return_pct = max(reference_return_pct, benchmark_return_pct)
+            else:
+                reference_return_pct = min(reference_return_pct, benchmark_return_pct)
         if strongest_benchmark_score <= 0:
             return 0.0, False
-        relative_weakness = strongest_benchmark_return - alt_return_pct
-        support_score = min(max(relative_weakness, 0.0) / 1.5, 1.0)
+        reference_return_pct = reference_return_pct or 0.0
+        if direction == Direction.SHORT:
+            relative_alignment = reference_return_pct - alt_return_pct
+        else:
+            relative_alignment = max(alt_return_pct, 0.0) if reference_return_pct < 0 else alt_return_pct
+        support_score = min(max(relative_alignment, 0.0) / 1.5, 1.0)
         headwind = strongest_benchmark_score >= self.strategy.btc_correlation_threshold and support_score < 0.35
         return support_score, headwind
 
@@ -1323,8 +1343,13 @@ class RuleEngine:
                 f"Сделок за 5s пока мало: {breakout.tick_qty_per_5s} при требуемых {self.strategy.tick_qty_per_5s}."
             )
         if breakout.correlation_headwind:
-            notes.append("BTC/ETH benchmark flow is too strong for this alt short.")
+            notes.append(self._correlation_headwind_text(direction))
         return notes
+
+    def _correlation_headwind_text(self, direction: Direction) -> str:
+        if direction == Direction.LONG:
+            return "BTC/ETH benchmark flow is pressing lower and raises false-breakout risk for this long."
+        return "BTC/ETH benchmark flow is pressing higher and raises false-breakdown risk for this short."
 
     def _classify(self, confidence: float) -> SignalClass:
         if confidence >= self.strategy.actionable_confidence_threshold:

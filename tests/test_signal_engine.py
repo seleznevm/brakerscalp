@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from brakerscalp.domain.models import LevelCandidate, LevelKind, Timeframe, Venue
+from brakerscalp.domain.models import Direction, LevelCandidate, LevelKind, Timeframe, Venue
 from brakerscalp.signals.engine import EngineInput, RuleEngine, StrategyRuntimeConfig
 from brakerscalp.signals.levels import LevelDetector
 
@@ -177,3 +177,82 @@ def test_pre_alert_is_suppressed_after_price_has_already_cleared_entry(
     )
 
     assert decision is None
+
+
+def test_trend_state_ignores_live_htf_spike(make_candles) -> None:
+    candles_1h = make_candles(symbol="BTCUSDT", timeframe=Timeframe.H1, count=80, start_price=200.0, step=-2.0)
+    candles_4h = make_candles(symbol="BTCUSDT", timeframe=Timeframe.H4, count=40, start_price=400.0, step=-5.0)
+    candles_1h[-1].open = candles_1h[-2].close
+    candles_1h[-1].low = min(candles_1h[-1].open, candles_1h[-1].close) - 1.0
+    candles_1h[-1].close = 360.0
+    candles_1h[-1].high = 362.0
+    candles_4h[-1].open = candles_4h[-2].close
+    candles_4h[-1].low = min(candles_4h[-1].open, candles_4h[-1].close) - 2.0
+    candles_4h[-1].close = 520.0
+    candles_4h[-1].high = 524.0
+
+    trend = RuleEngine()._trend_state(candles_1h, candles_4h)
+
+    assert trend.bias == Direction.SHORT
+
+
+def test_benchmark_support_blocks_long_when_btc_and_eth_dump(make_candles) -> None:
+    engine = RuleEngine(StrategyRuntimeConfig(enable_btc_eth_correlation_filter=True, btc_correlation_threshold=0.45))
+    execution_candles = make_candles(symbol="ORCAUSDT", timeframe=Timeframe.M5, count=12, start_price=10.0, step=-0.02)
+    btc_candles = make_candles(symbol="BTCUSDT", timeframe=Timeframe.M5, count=12, start_price=100.0, step=-2.0)
+    eth_candles = make_candles(symbol="ETHUSDT", timeframe=Timeframe.M5, count=12, start_price=80.0, step=-1.6)
+
+    support_score, headwind = engine._benchmark_support(
+        direction=Direction.LONG,
+        execution_candles=execution_candles,
+        benchmark_candles_5m={"BTCUSDT": btc_candles, "ETHUSDT": eth_candles},
+    )
+
+    assert headwind is True
+    assert support_score < 0.35
+
+
+def test_live_spike_does_not_use_unclosed_candle_shape_for_actionable_signal(
+    make_breakout_market, make_book, make_derivatives, make_health, make_trades
+) -> None:
+    candles_4h, candles_1h, candles_15m, candles_5m = make_breakout_market(symbol="BTCUSDT")
+    levels = LevelDetector().detect("BTCUSDT", Venue.BINANCE, candles_4h, candles_1h)
+    reference_level = max([item for item in levels if item.kind.value == "resistance"], key=lambda item: item.reference_price)
+
+    weak_closed = candles_5m[-2]
+    weak_closed.open = reference_level.upper_price + 0.8
+    weak_closed.low = reference_level.upper_price - 2.0
+    weak_closed.close = reference_level.upper_price + 1.0
+    weak_closed.high = reference_level.upper_price + 18.0
+    weak_closed.volume = 1800.0
+    weak_closed.quote_volume = weak_closed.volume * weak_closed.close
+
+    live_spike = candles_5m[-1]
+    live_spike.open = reference_level.upper_price + 1.0
+    live_spike.low = reference_level.upper_price + 0.5
+    live_spike.close = reference_level.upper_price + 30.0
+    live_spike.high = reference_level.upper_price + 30.5
+    live_spike.volume = 4200.0
+    live_spike.quote_volume = live_spike.volume * live_spike.close
+
+    engine = RuleEngine(StrategyRuntimeConfig(enable_btc_eth_correlation_filter=False))
+    decision = engine.evaluate(
+        EngineInput(
+            symbol="BTCUSDT",
+            venue=Venue.BINANCE,
+            candles_4h=candles_4h,
+            candles_1h=candles_1h,
+            candles_15m=candles_15m,
+            candles_5m=candles_5m,
+            levels=levels,
+            trades=make_trades(start_price=candles_5m[-1].close - 60.0),
+            book=make_book(),
+            derivative_context=make_derivatives(),
+            health=make_health(),
+            cross_venue_health=[make_health(venue=Venue.BYBIT), make_health(venue=Venue.OKX)],
+        )
+    )
+
+    assert decision is None or decision.signal_class.value != "actionable"
+    if decision is not None:
+        assert decision.signal_class.value != "actionable"
